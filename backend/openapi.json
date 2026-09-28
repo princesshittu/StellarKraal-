@@ -3,7 +3,7 @@
   "info": {
     "title": "StellarKraal API",
     "version": "1.0.0",
-    "description": "Livestock-backed micro-lending API on Stellar/Soroban. Write endpoints return an unsigned XDR transaction the client must sign with Freighter and submit to the Stellar network.\n\n**Rate limits:** Per-IP limits apply (global, auth, and write tiers). See the [rate limits guide](../docs/guides/rate-limits.md) for limits, headers, and retry behavior. See also the [API quickstart](../docs/guides/api-quickstart.md)."
+    "description": "Livestock-backed micro-lending API on Stellar/Soroban. Write endpoints return an unsigned XDR transaction the client must sign with Freighter and submit to the Stellar network.\n\n**Rate limits:** Per-IP limits apply (global, auth, and write tiers). See the [rate limits guide](../docs/guides/rate-limits.md) for limits, headers, and retry behavior. See also the [API quickstart](../docs/guides/api-quickstart.md).\n\n**Changelog:** All API-level additions and breaking changes are documented in the [API Changelog](../docs/api-changelog.md)."
   },
   "servers": [
     {
@@ -1176,14 +1176,22 @@
           "loan"
         ],
         "summary": "List loans (paginated)",
-        "description": "Returns a paginated list of loan records. Supports page and pageSize query parameters. Unpaginated requests (without page/pageSize) are deprecated and return Deprecation/Sunset headers.",
+        "description": "Returns a paginated list of loan records.\n\n**Cursor-based pagination (recommended)** — Pass `cursor=<nextCursor>` from the previous response. Provides stable, efficient traversal using `(createdAt, id)` as the composite key. `total` and `page` are omitted in cursor mode; use `nextCursor` and `hasMore` instead.\n\n**Offset-based pagination (legacy)** — Use `page` and `pageSize`/`limit` parameters. Remains fully supported for backward compatibility. Returns `total` and `page` fields.\n\nUnpaginated requests (without any pagination params) are deprecated and return `Deprecation`/`Sunset` headers.",
         "operationId": "listLoans",
         "security": [],
         "parameters": [
           {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque page token returned as `nextCursor` in a previous response. When provided, cursor-based pagination is used. Mutually exclusive with `page`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "page",
             "in": "query",
-            "description": "Page number for pagination (1-indexed).",
+            "description": "Page number for offset-based pagination (1-indexed). Ignored when `cursor` is supplied.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1193,12 +1201,58 @@
           {
             "name": "pageSize",
             "in": "query",
-            "description": "Number of records per page (1–100).",
+            "description": "Number of records per page (1–100). Applies to both cursor and offset modes.",
             "schema": {
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
               "default": 20
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Alias for `pageSize` (legacy). `pageSize` takes precedence when both are provided.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter loans by status.",
+            "schema": {
+              "type": "string",
+              "enum": ["active", "repaid", "liquidated"]
+            }
+          },
+          {
+            "name": "borrowerAddress",
+            "in": "query",
+            "description": "Filter loans belonging to this Stellar public key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "ISO 8601 start date for `createdAt` range filter (inclusive).",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "ISO 8601 end date for `createdAt` range filter (inclusive).",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
             }
           }
         ],
@@ -1225,7 +1279,7 @@
           "loan"
         ],
         "summary": "Get borrower loan portfolio summary",
-        "description": "Returns active loan metrics scoped to the authenticated borrower, including total active loans, collateral value, average health factor, and at-risk count. Responses are cached for 30 seconds.",
+        "description": "Returns aggregate loan metrics scoped to the authenticated borrower, including total loans by status and total loan value. Responses are cached for 30 seconds.",
         "operationId": "getLoanSummary",
         "responses": {
           "200": {
@@ -2672,7 +2726,7 @@
       },
       "LoanPage": {
         "type": "object",
-        "description": "Paginated response containing a list of loan records with total count and pagination metadata.",
+        "description": "Paginated response containing a list of loan records. Fields differ slightly between cursor and offset pagination modes — see `paginationMode`.",
         "properties": {
           "data": {
             "type": "array",
@@ -2684,15 +2738,33 @@
           },
           "total": {
             "type": "integer",
-            "description": "Total number of loan records matching the query."
+            "description": "Total number of loan records matching the query (offset mode only; -1 in cursor mode)."
           },
           "page": {
             "type": "integer",
-            "description": "Current page number (1-indexed)."
+            "description": "Current page number, 1-indexed (offset mode only; -1 in cursor mode)."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Effective page size used for this request."
           },
           "pageSize": {
             "type": "integer",
-            "description": "Number of records per page."
+            "description": "Alias for `limit` (API-v2 compatibility)."
+          },
+          "paginationMode": {
+            "type": "string",
+            "enum": ["cursor", "offset"],
+            "description": "Indicates which pagination strategy was used. `cursor` when `?cursor=` was supplied; `offset` otherwise."
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Opaque token to pass as `?cursor=` to fetch the next page (cursor mode only). `null` when there are no more records."
+          },
+          "hasMore": {
+            "type": "boolean",
+            "description": "Whether more records exist after the current page (cursor mode only)."
           }
         }
       },
@@ -2700,32 +2772,44 @@
         "type": "object",
         "description": "Borrower-specific loan portfolio summary with aggregate metrics.",
         "properties": {
+          "totalLoans": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total number of loans for the borrower."
+          },
           "activeLoans": {
             "type": "integer",
             "minimum": 0,
-            "description": "Number of active (non-repaid, non-defaulted) loans."
+            "description": "Number of active loans."
           },
-          "totalCollateralValue": {
-            "type": "number",
-            "minimum": 0,
-            "description": "Sum of appraised values of all collateral backing active loans."
-          },
-          "averageHealthFactor": {
-            "type": "number",
-            "minimum": 0,
-            "description": "Average health factor across active loans, scaled by 10 000."
-          },
-          "atRiskCount": {
+          "atRiskLoans": {
             "type": "integer",
             "minimum": 0,
-            "description": "Number of active loans with health factor below 10 000 (liquidation threshold)."
+            "description": "Number of at-risk loans."
+          },
+          "repaidLoans": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of repaid loans."
+          },
+          "liquidatedLoans": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of liquidated loans."
+          },
+          "totalLoanValueXLM": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Total value of all loans in XLM."
           }
         },
         "required": [
+          "totalLoans",
           "activeLoans",
-          "totalCollateralValue",
-          "averageHealthFactor",
-          "atRiskCount"
+          "atRiskLoans",
+          "repaidLoans",
+          "liquidatedLoans",
+          "totalLoanValueXLM"
         ]
       },
       "XdrResponse": {

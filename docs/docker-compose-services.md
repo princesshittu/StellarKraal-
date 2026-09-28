@@ -8,6 +8,8 @@ This document explains the service topology defined in `docker-compose.yml`, inc
 
 | Service | Image / Build | Port | Purpose |
 |---------|--------------|------|---------|
+| `postgres` | `postgres:15-alpine` | `5432` | Relational database |
+| `redis` | `redis:7-alpine` | `6379` | Cache and rate-limiting store |
 | `contract-builder` | `rust:1.78` | — | Compiles the Soroban WASM contract |
 | `backend` | `./backend/Dockerfile` | `3001` | Express API server |
 | `frontend` | `./frontend/Dockerfile` | `3000` | Next.js frontend |
@@ -20,46 +22,73 @@ This document explains the service topology defined in `docker-compose.yml`, inc
 ## Startup Order
 
 ```
-contract-builder   (no dependencies — runs independently)
-       │
-       ▼
-   backend          (no explicit depends_on — starts alongside contract-builder)
-       │  health check passes
-       ▼
-   frontend         (depends_on: backend condition: service_healthy)
+postgres (health check: pg_isready)      redis (health check: redis-cli ping)
+       │                                        │
+       └──────────────────┬─────────────────────┘
+                          │ (service_healthy)
+                          ▼
+                       backend   (health check: GET /health)
+                          │ (service_healthy)
+                          ▼
+                       frontend  (health check: GET /)
 
-   loki             (no dependencies)
-       │
-       ▼
-   promtail         (depends_on: loki)
-   grafana          (depends_on: loki)
+contract-builder (no dependencies — runs independently)
+
+loki             (no dependencies)
+  │
+  ├──► promtail  (depends_on: loki)
+  └──► grafana   (depends_on: loki)
 ```
 
 Key points:
 
-- `frontend` will not start until `backend` passes its health check. This prevents the Next.js app from hitting an unavailable API during its own build/boot phase.
-- `promtail` and `grafana` both wait for `loki` to be up before starting, but they use a simple `depends_on` (service started) rather than a health check dependency.
-- `contract-builder` is a one-shot compile step. It runs until the WASM artifact is built and then stops (`restart: unless-stopped` only restarts it if it exits non-zero).
+- `backend` will not start until `postgres` and `redis` pass their health checks.
+- `frontend` will not start until `backend` passes its health check.
+- `promtail` and `grafana` both wait for `loki` to be up before starting.
+- `contract-builder` is a one-shot compile step.
 
 ---
 
 ## Health Checks
 
+### postgres
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 10s
+```
+
+- Checks database availability using `pg_isready`.
+
+### redis
+
+```yaml
+healthcheck:
+  test: ["CMD", "redis-cli", "ping"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 5s
+```
+
+- Verifies Redis server responsiveness with `redis-cli ping`.
+
 ### backend
 
 ```yaml
 healthcheck:
-  test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+  test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
   interval: 30s
   timeout: 10s
   retries: 3
   start_period: 15s
 ```
 
-- Polls `GET /api/health` every 30 seconds.
-- Allows 15 seconds before the first check so the Node.js process and DB migrations have time to complete.
-- Marked `healthy` after the first successful check; marked `unhealthy` after 3 consecutive failures.
-- The health endpoint also checks DB connectivity and RPC reachability, returning HTTP 503 if either is down (which keeps the service in an `unhealthy` state).
+- Polls `GET /health` every 30 seconds, returning 200 when ready.
 
 ### frontend
 
@@ -72,7 +101,7 @@ healthcheck:
   start_period: 20s
 ```
 
-- Polls the root URL. The 20-second `start_period` accounts for Next.js build time on first start.
+- Polls the root URL `GET /`, returning 200 when ready.
 
 ---
 

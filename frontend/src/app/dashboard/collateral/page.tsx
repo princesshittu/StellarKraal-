@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, Suspense } from 'react';
 import { useRouter } from 'next/navigation';
 import WalletConnect from '@/components/WalletConnect';
 import CollateralSummary from '@/components/CollateralSummary';
@@ -10,7 +10,7 @@ import { usePagination } from '@/hooks/usePagination';
 import { useOwnerCollateral } from '@/hooks/useCollateral';
 import { Button } from '@/components/ui';
 
-export default function CollateralPage() {
+function CollateralContent() {
   const router = useRouter();
   const [wallet, setWallet] = useState<string | null>(null);
   const {
@@ -70,3 +70,12 @@ export default function CollateralPage() {
     </main>
   );
 }
+
+export default function CollateralPage() {
+  return (
+    <Suspense fallback={<main className="max-w-6xl mx-auto px-4 py-10"><div className="text-brown/60">Loading collateral...</div></main>}>
+      <CollateralContent />
+    </Suspense>
+  );
+}
+

@@ -233,6 +233,89 @@ describe("RepayPanel", () => {
   });
 });
 
+// ── #1204: double-submission prevention ────────────────────────────────────
+
+describe('RepayPanel double-submission prevention (#1204)', () => {
+  it('disables the submit button immediately after the first click', async () => {
+    // Hold the fetch pending so the button stays disabled
+    (global as any).fetch = jest.fn().mockImplementation(
+      () => new Promise(() => {})
+    );
+
+    renderPanel();
+    fireEvent.change(screen.getByPlaceholderText('Loan ID'), { target: { value: '1' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount (stroops)'), { target: { value: '100' } });
+
+    const button = screen.getByRole('button', { name: /repay/i });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText('Processing…')).toBeTruthy();
+    });
+
+    // Button must be disabled while the request is in-flight
+    expect(button).toBeDisabled();
+  });
+
+  it('shows a loading spinner after the first click', async () => {
+    (global as any).fetch = jest.fn().mockImplementation(
+      () => new Promise(() => {})
+    );
+
+    renderPanel();
+    fireEvent.change(screen.getByPlaceholderText('Loan ID'), { target: { value: '1' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount (stroops)'), { target: { value: '100' } });
+    fireEvent.click(screen.getByRole('button', { name: /repay/i }));
+
+    await waitFor(() => {
+      // Spinner has role="status" and aria-label
+      expect(screen.getByRole('status', { name: /processing/i })).toBeTruthy();
+    });
+  });
+
+  it('re-enables the button after a network error so the user can retry', async () => {
+    (global as any).fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+
+    renderPanel();
+    fireEvent.change(screen.getByPlaceholderText('Loan ID'), { target: { value: '1' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount (stroops)'), { target: { value: '100' } });
+    fireEvent.click(screen.getByRole('button', { name: /repay/i }));
+
+    await waitFor(() => {
+      // After error, button must be re-enabled for retry
+      expect(screen.getByRole('button', { name: /repay/i })).not.toBeDisabled();
+    });
+  });
+
+  it('does not submit a second request if clicked again while in-flight', async () => {
+    let resolveFirst!: (v: unknown) => void;
+    const fetchMock = jest.fn().mockImplementation(() => new Promise((res) => {
+      resolveFirst = res;
+    }));
+    (global as any).fetch = fetchMock;
+
+    renderPanel();
+    fireEvent.change(screen.getByPlaceholderText('Loan ID'), { target: { value: '1' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount (stroops)'), { target: { value: '100' } });
+
+    const button = screen.getByRole('button', { name: /repay/i });
+    fireEvent.click(button);
+
+    // Wait for the button to become disabled
+    await waitFor(() => expect(button).toBeDisabled());
+
+    // Try clicking again — should have no effect
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    // fetch must still have been called only once
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Settle the promise to avoid act() warnings
+    resolveFirst({ ok: true, json: async () => ({ xdr: 'xdr' }) });
+  });
+});
+
 // #494: Error boundary wrapping
 describe('RepayPanel error boundary (#494)', () => {
   function Bomb({ shouldThrow }: { shouldThrow: boolean }) {

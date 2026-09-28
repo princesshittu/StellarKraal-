@@ -54,12 +54,31 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
   }
 
-  """Paginated list of loans."""
+  """Paginated list of loans (offset-based)."""
   type LoanPage {
     data: [Loan!]!
     total: Int!
     page: Int!
     limit: Int!
+  }
+
+  """Cursor edge for a single loan in a connection."""
+  type LoanEdge {
+    cursor: String!
+    node: Loan!
+  }
+
+  """Page info for cursor-based (relay-style) pagination."""
+  type PageInfo {
+    hasNextPage: Boolean!
+    endCursor: String
+  }
+
+  """Cursor-based connection for loans (relay-style)."""
+  type LoanConnection {
+    edges: [LoanEdge!]!
+    pageInfo: PageInfo!
+    totalCount: Int!
   }
 
   """Paginated list of collateral records."""
@@ -78,13 +97,20 @@ export const typeDefs = `#graphql
   # ── Queries ────────────────────────────────────────────────────────────────
 
   type Query {
-    """List loans with optional pagination and filters."""
+    """
+    List loans with optional pagination and filters.
+    When \`cursor\` is supplied the query returns results after that cursor
+    (cursor-based / relay-style pagination).  When omitted, offset-based
+    pagination via \`page\` is used instead.
+    """
     loans(
       page: Int
       limit: Int
       status: LoanStatus
       borrowerAddress: String
-    ): LoanPage!
+      """Opaque cursor returned from a previous LoanConnection.pageInfo.endCursor."""
+      cursor: String
+    ): LoanConnection!
 
     """Fetch a single loan by its ID."""
     loan(id: ID!): Loan

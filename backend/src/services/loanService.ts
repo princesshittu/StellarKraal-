@@ -14,6 +14,7 @@ import { stellarPublicKeySchema } from "../validators/stellar";
 import {
   getCollateral,
   listLoans,
+  listLoansCursor,
   getLoan,
   updateLoan,
   updateCollateral,
@@ -91,6 +92,12 @@ export interface ListLoansQuery {
   from?: string;
   /** ISO 8601 end date for `created_at` range filter. */
   to?: string;
+  /**
+   * Opaque cursor token returned in a previous response.
+   * When provided, cursor-based pagination is used instead of offset-based.
+   * The cursor encodes `createdAt` + `id` of the last record seen.
+   */
+  cursor?: string;
 }
 
 /**
@@ -107,6 +114,23 @@ export interface ListLoansResult {
   limit: number;
   /** Alias for `limit` provided for API-v2 compatibility. */
   pageSize: number;
+  /**
+   * Opaque cursor token for the **next** page of results.
+   * Present only when cursor-based pagination was used (`?cursor=…`).
+   * Pass this value as `?cursor=<nextCursor>` on the subsequent request.
+   * `null` means there are no further records.
+   */
+  nextCursor?: string | null;
+  /**
+   * Whether more records exist after the current page.
+   * Present only when cursor-based pagination was used.
+   */
+  hasMore?: boolean;
+  /**
+   * Pagination mode used for this response.
+   * `"cursor"` when `?cursor=` was supplied, `"offset"` otherwise.
+   */
+  paginationMode?: 'cursor' | 'offset';
 }
 
 /**
@@ -342,19 +366,26 @@ export async function getHealthFactor(loanId: string) {
 }
 
 /**
- * Lists loans with pagination and optional status / date / borrower filters.
+ * Lists loans with pagination (offset-based or cursor-based) and optional
+ * status / date / borrower filters.
  *
- * Normalises both `pageSize` (new) and `limit` (legacy) query parameters and
- * delegates to the database store. Validates all inputs before querying.
+ * **Cursor mode** — When `query.cursor` is provided the function delegates to
+ * {@link listLoansCursor} for efficient, stable traversal using
+ * `(createdAt, id)` as the composite cursor key.  The response includes
+ * `nextCursor` (the token for the next page, or `null`) and `hasMore`.
+ *
+ * **Offset mode** — When no `cursor` is provided, the legacy offset/page
+ * mechanism is used for backward compatibility. Both `pageSize` (new) and
+ * `limit` (legacy) are accepted.
  *
  * @param query - Query string parameters forwarded from the HTTP request.
  * @returns A paginated result object containing the loan data and metadata.
- * @throws {@link InvalidPaginationError} When `page` or `limit`/`pageSize` are
- *   non-integer or out of range, when `status` is not one of the accepted
- *   values, or when `from`/`to` are not parseable ISO 8601 dates.
+ * @throws {@link InvalidPaginationError} When pagination parameters are
+ *   non-integer or out of range, status is not an accepted value, or
+ *   `from`/`to` are not parseable ISO 8601 dates.
  */
 export function listLoansPaginated(query: ListLoansQuery): ListLoansResult {
-  const pageRaw = query.page !== undefined ? Number(query.page) : 1;
+  // ── Resolve limit ──────────────────────────────────────────────────────────
   let limitRaw = 20;
   let isPageSize = false;
 
@@ -365,17 +396,18 @@ export function listLoansPaginated(query: ListLoansQuery): ListLoansResult {
     limitRaw = Number(query.limit);
   }
 
-  if (!Number.isInteger(pageRaw) || pageRaw < 1 || !Number.isInteger(limitRaw) || limitRaw < 1) {
+  if (!Number.isInteger(limitRaw) || limitRaw < 1) {
     throw new InvalidPaginationError();
   }
 
-  if (!isPageSize && limitRaw > 100) {
-    throw new InvalidPaginationError();
+  if (limitRaw > 100) {
+    throw new InvalidPaginationError("pageSize must be between 1 and 100");
   }
 
   const maxLimit = Math.min(limitRaw, 100);
-  const { status, borrowerAddress, from, to } = query;
+  const { status, borrowerAddress, from, to, cursor } = query;
 
+  // ── Shared filter validation ───────────────────────────────────────────────
   const validStatuses = ["active", "repaid", "liquidated"];
   if (status && !validStatuses.includes(status)) {
     throw new InvalidPaginationError(`status must be one of: ${validStatuses.join(", ")}`);
@@ -387,6 +419,36 @@ export function listLoansPaginated(query: ListLoansQuery): ListLoansResult {
     throw new InvalidPaginationError("to must be a valid ISO date");
   }
 
+  // ── Cursor mode ────────────────────────────────────────────────────────────
+  if (cursor !== undefined) {
+    const cursorResult = listLoansCursor({
+      cursor,
+      limit: maxLimit,
+      status,
+      borrowerAddress,
+      from,
+      to,
+    });
+
+    return {
+      data: cursorResult.data,
+      total: -1,       // total is not computed in cursor mode (undefined cost)
+      page: -1,        // not applicable in cursor mode
+      limit: maxLimit,
+      pageSize: maxLimit,
+      nextCursor: cursorResult.nextCursor,
+      hasMore: cursorResult.hasMore,
+      paginationMode: 'cursor',
+    };
+  }
+
+  // ── Offset mode (backward compat) ─────────────────────────────────────────
+  const pageRaw = query.page !== undefined ? Number(query.page) : 1;
+
+  if (!Number.isInteger(pageRaw) || pageRaw < 1) {
+    throw new InvalidPaginationError();
+  }
+
   const result = listLoans({ status, borrowerAddress, from, to, page: pageRaw, limit: maxLimit });
   return {
     data: result.data,
@@ -394,5 +456,8 @@ export function listLoansPaginated(query: ListLoansQuery): ListLoansResult {
     page: result.page,
     limit: result.limit,
     pageSize: result.limit,
+    nextCursor: null,
+    hasMore: false,
+    paginationMode: 'offset',
   };
 }

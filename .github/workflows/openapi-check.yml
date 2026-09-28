@@ -9,6 +9,7 @@ on:
       - "backend/src/index.ts"
       - "backend/openapi.json"
       - "backend/package.json"
+      - "docs/api-changelog.md"
   push:
     branches:
       - main
@@ -146,3 +147,43 @@ jobs:
       - name: Stop backend server
         if: always()
         run: kill "$SERVER_PID" 2>/dev/null || true
+
+  check-changelog-staleness:
+    name: Changelog staleness check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail if openapi.json changed without updating api-changelog.md
+        run: |
+          # Collect the list of files changed in this PR (or the last commit on push)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse --root)"
+            HEAD="HEAD"
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+
+          SPEC_CHANGED=false
+          CHANGELOG_CHANGED=false
+
+          echo "$CHANGED" | grep -q "^backend/openapi\.json$"  && SPEC_CHANGED=true
+          echo "$CHANGED" | grep -q "^docs/api-changelog\.md$" && CHANGELOG_CHANGED=true
+
+          echo "openapi.json changed:    $SPEC_CHANGED"
+          echo "api-changelog.md changed: $CHANGELOG_CHANGED"
+
+          if [ "$SPEC_CHANGED" = "true" ] && [ "$CHANGELOG_CHANGED" = "false" ]; then
+            echo ""
+            echo "ERROR: backend/openapi.json was modified but docs/api-changelog.md was not updated."
+            echo "Please add an entry to docs/api-changelog.md describing the API change."
+            echo "See the Keep-a-Changelog format in the existing entries for guidance."
+            exit 1
+          fi
+
+          echo "Changelog check passed."

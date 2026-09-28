@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import CurrencySettings from "@/components/CurrencySettings";
 import NotificationPreferences from "@/components/NotificationPreferences";
 import DensityToggle from "@/components/DensityToggle";
+import ToastPositionSelector from "@/components/ToastPositionSelector";
 import Link from "next/link";
 
 export const metadata: Metadata = {

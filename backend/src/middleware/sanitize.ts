@@ -231,7 +231,7 @@ export function sanitizeInput(req: Request, res: Response, next: NextFunction): 
         res.status(422).json({
           error: 'Validation failed',
           code: 'VALIDATION_ERROR',
-          details: errors.array().map((issue) => ({
+          details: errors.array().map((issue: any) => ({
             field: 'path' in issue ? issue.path : '_root',
             message: issue.msg,
           })),

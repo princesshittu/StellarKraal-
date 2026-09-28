@@ -48,6 +48,13 @@ export const resolvers = {
   Query: {
     /**
      * List loans with optional pagination and filters.
+     *
+     * Supports two pagination modes:
+     * - Offset-based (legacy): supply `page` + `limit`.
+     * - Cursor-based (relay-style): supply `cursor` + `limit`.
+     *
+     * Always returns a `LoanConnection` with relay-style edges and pageInfo
+     * regardless of which mode is used.
      */
     loans(
       _parent: unknown,
@@ -56,10 +63,67 @@ export const resolvers = {
         limit?: number;
         status?: string;
         borrowerAddress?: string;
+        cursor?: string;
       }
     ) {
-      const { page = 1, limit = 20, status, borrowerAddress } = args;
-      return listLoans({ page, limit, status, borrowerAddress });
+      const { limit = 20, status, borrowerAddress, cursor } = args;
+      const safeLimit = Math.min(Math.max(limit, 1), 100);
+
+      if (cursor) {
+        // Cursor-based mode: decode the opaque cursor (base64 ISO date string)
+        // and return items created after that timestamp.
+        let afterDate: Date;
+        try {
+          afterDate = new Date(Buffer.from(cursor, 'base64').toString('utf8'));
+          if (isNaN(afterDate.getTime())) throw new Error('invalid date');
+        } catch {
+          throw new GraphQLError('Invalid cursor', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+
+        // Fetch one extra item to determine hasNextPage
+        const pageResult = listLoans({ status, borrowerAddress, page: 1, limit: 10_000 });
+        const allLoans = pageResult.data.filter(
+          (l) => new Date(l.createdAt) < afterDate
+        );
+        const sliced = allLoans.slice(0, safeLimit);
+        const hasNextPage = allLoans.length > safeLimit;
+
+        const edges = sliced.map((loan) => ({
+          cursor: Buffer.from(loan.createdAt).toString('base64'),
+          node: loan,
+        }));
+
+        return {
+          edges,
+          pageInfo: {
+            hasNextPage,
+            endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+          },
+          totalCount: pageResult.total,
+        };
+      }
+
+      // Offset-based mode
+      const { page = 1 } = args;
+      const result = listLoans({ page, limit: safeLimit, status, borrowerAddress });
+
+      const edges = result.data.map((loan) => ({
+        cursor: Buffer.from(loan.createdAt).toString('base64'),
+        node: loan,
+      }));
+
+      const hasNextPage = page * safeLimit < result.total;
+
+      return {
+        edges,
+        pageInfo: {
+          hasNextPage,
+          endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+        },
+        totalCount: result.total,
+      };
     },
 
     /**

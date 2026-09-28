@@ -1,7 +1,7 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   ClipboardList,
@@ -18,6 +18,17 @@ import NotificationBadge from "@/components/NotificationBadge";
 import { NotificationBell, NotificationDrawer } from "@/components/NotificationDrawer";
 import { useNotifications } from "@/hooks/useNotifications";
 import { useShortcutsHelp } from "@/components/KeyboardShortcutsProvider";
+// i18n — Issue #1207
+import LanguageSwitcher from "@/components/LanguageSwitcher";
+
+const JWT_COOKIE_NAME = "session";
+
+/** Expires the JWT session cookie on disconnect — Issue #1208. */
+function clearSessionCookie(): void {
+  if (typeof document === "undefined") return;
+  document.cookie = `${JWT_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax`;
+  document.cookie = `${JWT_COOKIE_NAME}=; path=/; max-age=0; SameSite=Strict`;
+}
 
 const NAV_SECTIONS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -52,6 +63,7 @@ export default function Navbar() {
   const [notifOpen, setNotifOpen] = useState(false);
   const walletDropdownRef = useRef<HTMLDivElement>(null);
   const pathname = usePathname();
+  const router = useRouter();
   const { address, connect, disconnect } = useWallet();
   const { atRiskCount } = useAtRiskLoans();
   const shortcutsHelp = useShortcutsHelp();
@@ -63,6 +75,13 @@ export default function Navbar() {
     dismiss,
     dismissAll,
   } = useNotifications();
+
+  /** Full auth-clearing disconnect — Issue #1208. */
+  function handleDisconnect() {
+    disconnect();
+    clearSessionCookie();
+    router.push("/");
+  }
 
   // Close wallet dropdown when clicking outside
   useEffect(() => {
@@ -174,6 +193,9 @@ export default function Navbar() {
           >
             <Icon icon={Keyboard} size="sm" className="text-[color:var(--color-text-muted)]" />
           </button>
+
+          {/* Language switcher — #1207 */}
+          <LanguageSwitcher />
 
           {/* Notification bell — #1066 */}
           <NotificationBell

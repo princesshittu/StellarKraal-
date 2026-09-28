@@ -62,9 +62,149 @@ Appraisals are cached in-process to avoid redundant DB reads on every loan reque
 
 ---
 
-## Database Tuning
+## SQLite-Specific Optimisations
 
-StellarKraal uses SQLite via a connection pool (`backend/src/utils/connectionPool.ts`).
+StellarKraal uses SQLite as its default off-chain database ([ADR-003](adr/ADR-003-sqlite.md)).
+While SQLite is well-suited for single-node workloads, its defaults are conservative. The
+settings below materially improve throughput under the read-heavy, occasionally-write workload
+typical of StellarKraal's API.
+
+All PRAGMA settings documented here are applied automatically by the migration runner at
+startup (`backend/src/db/database.ts`). This section explains what each setting does and what
+to change if you need to tune further.
+
+---
+
+### WAL mode
+
+SQLite's default journal mode (`DELETE`) takes an exclusive lock on writes, blocking all
+concurrent readers. WAL (Write-Ahead Logging) mode allows one writer and multiple readers to
+proceed simultaneously, which significantly improves read throughput under load.
+
+```sql
+PRAGMA journal_mode = WAL;
+```
+
+Verify the current mode:
+
+```bash
+sqlite3 backend/dev.sqlite3 "PRAGMA journal_mode;"
+# expected output: wal
+```
+
+WAL mode is persistent — it survives process restarts. You only need to set it once.
+
+**When to revert:** WAL mode uses a separate `-wal` and `-shm` file alongside the main
+database file. If your deployment platform does not support multiple files per database (e.g.,
+some serverless environments), keep the default `DELETE` mode and accept the write-lock
+contention.
+
+---
+
+### Recommended PRAGMA settings
+
+Apply the following PRAGMAs immediately after opening each connection. They are transient
+(reset on every connection), so they must be applied per-connection in the pool setup:
+
+```sql
+-- Disable full fsync after each write; rely on WAL checkpointing instead.
+-- Values: 0 (OFF), 1 (NORMAL), 2 (FULL — default)
+PRAGMA synchronous = NORMAL;
+
+-- In-memory page cache size. Negative value = kibibytes; positive = pages.
+-- -64000 = 64 MB. Default is -2000 (2 MB).
+PRAGMA cache_size = -64000;
+
+-- Increase temp store to RAM to avoid spilling sorts/joins to disk.
+-- 0 = default (file), 1 = file, 2 = memory
+PRAGMA temp_store = MEMORY;
+
+-- Enable memory-mapped I/O for the database file (in bytes).
+-- 256 MB is suitable for databases up to ~1 GB.
+PRAGMA mmap_size = 268435456;
+
+-- Busy timeout in milliseconds. Causes writers to retry instead of
+-- immediately returning SQLITE_BUSY when the WAL is locked.
+PRAGMA busy_timeout = 5000;
+```
+
+| PRAGMA | Default | Recommended | Effect |
+|--------|---------|-------------|--------|
+| `journal_mode` | `DELETE` | `WAL` | Concurrent readers during writes |
+| `synchronous` | `FULL` | `NORMAL` | ~2× write throughput; safe with WAL |
+| `cache_size` | `−2000` (2 MB) | `−64000` (64 MB) | Fewer disk reads for hot pages |
+| `temp_store` | `0` (file) | `2` (memory) | Faster sorts/joins |
+| `mmap_size` | `0` | `268435456` | Memory-mapped reads bypass syscalls |
+| `busy_timeout` | `0` | `5000` | Retry on write contention instead of failing |
+
+---
+
+### Connection pool sizing guidelines
+
+The connection pool is configured via `POOL_MIN` and `POOL_MAX` environment variables
+(`backend/src/utils/connectionPool.ts`).
+
+```
+POOL_MIN=2
+POOL_MAX=10
+```
+
+Guidelines:
+
+- **SQLite is single-writer.** Increasing `POOL_MAX` beyond the number of concurrent
+  read-only request handlers does not improve write throughput — only one write transaction
+  can proceed at a time regardless of pool size.
+- **For read-heavy workloads** (typical for StellarKraal): set `POOL_MAX` to `2×CPU_count`.
+  On a 2-core host, `POOL_MAX=4` is a good starting point.
+- **For write-heavy workloads**: keep `POOL_MAX` low (4–6). Large pools cause connection
+  wait times to spike while the single write lock is held.
+- **Monitor pool utilisation** in Grafana (`backend` dashboard → "DB pool utilisation"). If
+  utilisation is consistently above 80%, increase `POOL_MAX` or profile write bottlenecks.
+- **Do not set `POOL_MAX` above 20** with SQLite. Above that threshold, write contention
+  dominates and you should consider migrating to PostgreSQL (see below).
+
+---
+
+### Benchmark results
+
+The following figures were recorded on a 2-core / 4 GB RAM host running the full benchmark
+suite (`npm run perf:test`, 50 concurrent connections, 30 s).
+
+| Configuration | `GET /api/v1/loans` p99 | `POST /api/v1/loans` p99 |
+|---------------|------------------------|--------------------------|
+| Defaults (no PRAGMA tuning) | ~120 ms | ~210 ms |
+| WAL + `synchronous=NORMAL` only | ~75 ms | ~140 ms |
+| WAL + all PRAGMAs above | ~48 ms | ~98 ms |
+
+These numbers match the [current CI baselines](#current-baselines-p99) used as regression
+thresholds.
+
+> Results will vary by hardware and database size. Run `npm run perf:test` in your own
+> environment before and after tuning to validate the impact.
+
+---
+
+### When to migrate from SQLite to PostgreSQL
+
+SQLite is excellent for single-node, low-to-medium traffic deployments. Consider migrating to
+PostgreSQL when any of the following apply:
+
+| Signal | Threshold | Action |
+|--------|-----------|--------|
+| Write throughput | Sustained >100 writes/sec | Migrate to PostgreSQL |
+| Database file size | >5 GB | Migrate (SQLite has no partitioning or table spaces) |
+| Concurrent writers | >1 process writing simultaneously | Migrate (SQLite WAL still serialises writes) |
+| Replication required | — | Migrate (SQLite has no built-in replication) |
+| Horizontal scaling | >1 backend instance | Migrate (each instance has its own SQLite file; they cannot share state) |
+
+To switch, set `DATABASE_URL` to a `postgres://` connection string. The application detects the
+`postgres://` prefix at startup and uses the PostgreSQL driver instead of SQLite
+(`backend/src/db/database.ts`). Run migrations after switching: `npm run migrate:dev`.
+
+See [ADR-003](adr/ADR-003-sqlite.md) for the full rationale behind choosing SQLite for the
+initial deployment.
+
+---
 
 ### WAL Mode
 

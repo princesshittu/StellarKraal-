@@ -62,18 +62,18 @@ import app from "./index";
 import { insertCollateral, insertLoan } from "./db/store";
 
 describe("GET /api/v1/loans/summary", () => {
-  it("returns borrower-scoped aggregate metrics", async () => {
+  it("returns borrower-scoped aggregate metrics with loan counts by status", async () => {
     const borrower = `G-SUM-${Date.now()}`;
     const otherBorrower = `G-SUM-OTHER-${Date.now()}`;
 
-    const c1 = insertCollateral({
+    insertCollateral({
       id: `sum-col-1-${Date.now()}`,
       owner: borrower,
       animal_type: "cattle",
       count: 2,
       appraised_value: 1000,
     });
-    const c2 = insertCollateral({
+    insertCollateral({
       id: `sum-col-2-${Date.now()}`,
       owner: borrower,
       animal_type: "goat",
@@ -84,27 +84,38 @@ describe("GET /api/v1/loans/summary", () => {
     insertLoan({
       id: `sum-loan-1-${Date.now()}`,
       borrower,
-      collateral_id: c1.id,
+      collateral_id: "sum-col-1",
       amount: 400,
       status: "active",
-      health_factor: 1.1,
     });
     insertLoan({
       id: `sum-loan-2-${Date.now()}`,
       borrower,
-      collateral_id: c2.id,
+      collateral_id: "sum-col-2",
       amount: 200,
       status: "at_risk",
-      health_factor: 1.3,
+    });
+    insertLoan({
+      id: `sum-loan-4-${Date.now()}`,
+      borrower,
+      collateral_id: "sum-col-1",
+      amount: 150,
+      status: "repaid",
+    });
+    insertLoan({
+      id: `sum-loan-5-${Date.now()}`,
+      borrower,
+      collateral_id: "sum-col-2",
+      amount: 100,
+      status: "liquidated",
     });
 
     insertLoan({
       id: `sum-loan-3-${Date.now()}`,
       borrower: otherBorrower,
-      collateral_id: c1.id,
+      collateral_id: "sum-col-1",
       amount: 999,
       status: "active",
-      health_factor: 0.9,
     });
 
     testUser = { publicKey: borrower };
@@ -112,10 +123,12 @@ describe("GET /api/v1/loans/summary", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      activeLoans: 2,
-      totalCollateralValue: 1500,
-      averageHealthFactor: 1.2,
-      atRiskCount: 1,
+      totalLoans: 4,
+      activeLoans: 1,
+      atRiskLoans: 1,
+      repaidLoans: 1,
+      liquidatedLoans: 1,
+      totalLoanValueXLM: 850,
     });
   });
 

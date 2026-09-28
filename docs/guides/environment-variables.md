@@ -48,6 +48,16 @@ Soroban JSON-RPC endpoint the backend uses to submit transactions and query cont
 
 The deployed Soroban contract address. Obtain this after running `stellar contract deploy`. A mismatch between this value and the actual on-chain deployment will cause all loan lifecycle operations to fail silently or with cryptic RPC errors.
 
+### `HORIZON_URL`
+
+| | |
+|---|---|
+| Required | No |
+| Format | HTTPS URL |
+| Default | `https://horizon-testnet.stellar.org` |
+
+Stellar Horizon API URL used as a fallback for account balance reads when the Soroban RPC endpoint is unavailable. Optional — when unset the backend uses the public Horizon endpoint for the configured network. Override this if you need to point at a private or local Horizon instance.
+
 ---
 
 ## Frontend
@@ -269,6 +279,32 @@ Maximum time the server waits for in-flight requests to complete after receiving
 
 Directory where structured audit log files are written. Each audit event (admin actions, loan state changes, authentication events) is appended as a JSON line. Ensure the backend process has write access to this directory. In production, use an absolute path (e.g., `/var/log/stellarkraal/audit`).
 
+### Logging
+
+These variables control the application logger. All are optional with safe defaults.
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `info` | Minimum log severity to emit: `debug`, `info`, `warn`, or `error`. Use `debug` when troubleshooting; keep `info` or higher in production to reduce noise. |
+| `LOG_MAX_SIZE` | `10m` | Maximum size of a single log file before rotation (e.g., `10m`, `100m`). |
+| `LOG_MAX_FILES` | `7` | Number of rotated log files to retain before the oldest is deleted. A value of `7` gives 7-day retention for daily rotation. |
+
+### `METRICS_TOKEN`
+
+| | |
+|---|---|
+| Required | No |
+| Format | Arbitrary string |
+| GitHub Secret | `METRICS_TOKEN` |
+
+Bearer token required to access the Prometheus `/metrics` endpoint on the backend. When unset, `/metrics` is unauthenticated — acceptable for local development, but always set this in production. Generate with:
+
+```bash
+openssl rand -hex 32
+```
+
+Scrape configs in Prometheus must include `Authorization: Bearer <token>` when this is set.
+
 ### `DATABASE_URL`
 
 | | |
@@ -317,6 +353,116 @@ Base URL prepended to runbook paths in alert messages. Override this if you host
 
 ---
 
+## Docker
+
+These variables are used exclusively by Docker Compose services (Grafana and staging overrides). They are not read by `backend/src/config.ts`. Add them to your `.env` file when running the Docker Compose stack.
+
+### Grafana
+
+`docker-compose.prod.yml` passes the `.env` file to the Grafana container, so these variables must be set in `.env` before starting the prod stack.
+
+### `GF_SECURITY_ADMIN_USER`
+
+| | |
+|---|---|
+| Required | No |
+| Format | Non-empty string |
+| Default | `admin` |
+| GitHub Secret | `GF_SECURITY_ADMIN_USER` |
+
+Grafana admin username. Used to log in to the Grafana UI at `/login`. Change from the default in all non-local environments.
+
+### `GF_SECURITY_ADMIN_PASSWORD`
+
+| | |
+|---|---|
+| Required | In production |
+| Format | Non-empty string, minimum 8 characters recommended |
+| GitHub Secret | `GF_SECURITY_ADMIN_PASSWORD` |
+
+Grafana admin password. Never leave this as the default value in any environment reachable from the internet. Generate with:
+
+```bash
+openssl rand -hex 16
+```
+
+### `GF_AUTH_ANONYMOUS_ENABLED`
+
+| | |
+|---|---|
+| Required | No |
+| Format | `true` \| `false` |
+| Default | `true` (local dev) |
+
+Allows unauthenticated read-only access to Grafana dashboards. Set to `false` in production to require login. The base `docker-compose.yml` hardcodes `true` for convenience; override with `false` via `.env` in production.
+
+### `GF_AUTH_ANONYMOUS_ORG_ROLE`
+
+| | |
+|---|---|
+| Required | No |
+| Format | `Viewer` \| `Editor` \| `Admin` |
+| Default | `Viewer` |
+
+Role granted to anonymous users when `GF_AUTH_ANONYMOUS_ENABLED=true`. Keep this as `Viewer` — granting `Editor` or `Admin` to anonymous users is a security risk.
+
+---
+
+### Staging overrides
+
+These variables are consumed by `docker-compose.staging.yml` when running the staging stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+```
+
+Store them as GitHub Actions environment secrets under the `staging` environment (Settings → Environments → staging).
+
+### `STAGING_RPC_URL`
+
+| | |
+|---|---|
+| Required | For staging |
+| Format | HTTPS URL |
+| Default | `https://soroban-testnet.stellar.org` |
+| GitHub Secret | `STAGING_RPC_URL` |
+
+Soroban RPC endpoint used by the staging backend and frontend. Overrides `RPC_URL` in the staging Compose override.
+
+### `STAGING_CONTRACT_ID`
+
+| | |
+|---|---|
+| Required | For staging |
+| Format | 56-character Stellar contract/account ID |
+| GitHub Secret | `STAGING_CONTRACT_ID` |
+
+Soroban contract address for the staging deployment. Must match the contract deployed against the staging RPC endpoint. Overrides `CONTRACT_ID` in the staging Compose override.
+
+### `STAGING_API_URL`
+
+| | |
+|---|---|
+| Required | For staging |
+| Format | HTTPS URL, no trailing slash |
+| Default | `https://api-staging.stellarkraal.example.com` |
+| GitHub Secret | `STAGING_API_URL` |
+
+Public base URL of the staging backend API. Used by the staging frontend as `NEXT_PUBLIC_API_URL`. Overrides `NEXT_PUBLIC_API_URL` in the staging Compose override.
+
+### `STAGING_FRONTEND_URL`
+
+| | |
+|---|---|
+| Required | For staging |
+| Format | HTTPS URL, no trailing slash |
+| Default | `https://staging.stellarkraal.example.com` |
+| GitHub Secret | `STAGING_FRONTEND_URL` |
+
+Staging frontend URL used to configure CORS on the staging backend. Overrides `FRONTEND_URL` in the staging Compose override.
+
+---
+
 ## Quick-reference table
 
 | Variable | Service | Required | Default |
@@ -324,6 +470,7 @@ Base URL prepended to runbook paths in alert messages. Override this if you host
 | `NEXT_PUBLIC_NETWORK` | Shared | Yes | `testnet` |
 | `RPC_URL` | Shared | Yes | — |
 | `CONTRACT_ID` | Shared | Yes | — |
+| `HORIZON_URL` | Shared | No | (public Horizon) |
 | `NEXT_PUBLIC_API_URL` | Frontend | Yes | `http://localhost:3001` |
 | `NEXT_PUBLIC_RPC_URL` | Frontend | Yes | `https://soroban-testnet.stellar.org` |
 | `PORT` | Backend | No | `3001` |
@@ -350,7 +497,19 @@ Base URL prepended to runbook paths in alert messages. Override this if you host
 | `HEALTH_FACTOR_CRIT` | Backend | No | `10000` |
 | `SHUTDOWN_TIMEOUT_MS` | Backend | No | `10000` |
 | `AUDIT_LOG_DIR` | Backend | No | — |
+| `LOG_LEVEL` | Backend | No | `info` |
+| `LOG_MAX_SIZE` | Backend | No | `10m` |
+| `LOG_MAX_FILES` | Backend | No | `7` |
+| `METRICS_TOKEN` | Backend | Prod recommended | — |
 | `DATABASE_URL` | Backend | Prod only | — (SQLite) |
 | `SLACK_WEBHOOK_URL` | Alerting | No | — |
 | `PAGERDUTY_ROUTING_KEY` | Alerting | No | — |
 | `RUNBOOK_BASE_URL` | Alerting | No | (GitHub URL) |
+| `GF_SECURITY_ADMIN_USER` | Docker/Grafana | No | `admin` |
+| `GF_SECURITY_ADMIN_PASSWORD` | Docker/Grafana | Prod only | — |
+| `GF_AUTH_ANONYMOUS_ENABLED` | Docker/Grafana | No | `true` |
+| `GF_AUTH_ANONYMOUS_ORG_ROLE` | Docker/Grafana | No | `Viewer` |
+| `STAGING_RPC_URL` | Docker/Staging | Staging only | (testnet RPC) |
+| `STAGING_CONTRACT_ID` | Docker/Staging | Staging only | — |
+| `STAGING_API_URL` | Docker/Staging | Staging only | (staging URL) |
+| `STAGING_FRONTEND_URL` | Docker/Staging | Staging only | (staging URL) |

@@ -321,13 +321,26 @@ v1Router.get(
   asyncHandler(async (req: Request, res: Response) => {
     try {
       const result = listLoansPaginated(req.query as Record<string, string | undefined>);
-      res.json({
+      const body: Record<string, unknown> = {
         data: result.data,
-        total: result.total,
-        page: result.page,
         limit: result.limit,
         pageSize: result.pageSize,
-      });
+        paginationMode: result.paginationMode,
+      };
+
+      if (result.paginationMode === 'cursor') {
+        // Cursor mode: omit offset-only fields, expose cursor navigation fields
+        body.nextCursor = result.nextCursor ?? null;
+        body.hasMore = result.hasMore ?? false;
+      } else {
+        // Offset mode: include legacy total/page fields
+        body.total = result.total;
+        body.page = result.page;
+        body.nextCursor = null;
+        body.hasMore = false;
+      }
+
+      res.json(body);
     } catch (err) {
       if (err instanceof InvalidPaginationError) {
         return res.status(400).json({ error: err.message });

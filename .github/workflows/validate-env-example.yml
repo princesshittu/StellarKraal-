@@ -6,12 +6,15 @@ on:
       - "backend/src/config.ts"
       - ".env.example"
       - "scripts/validate-env-example.js"
+      - "docs/guides/environment-variables.md"
+      - "docker-compose*.yml"
       - ".github/workflows/validate-env-example.yml"
   push:
     branches: [main]
     paths:
       - "backend/src/config.ts"
       - ".env.example"
+      - "docker-compose*.yml"
 
 jobs:
   validate:

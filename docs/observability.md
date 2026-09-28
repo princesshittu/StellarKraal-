@@ -7,6 +7,178 @@ metric, and how to extend the stack.
 
 ---
 
+## Local Observability Stack Quick-Start
+
+This section gives you a complete, step-by-step walkthrough for spinning up the
+local observability stack, importing the pre-built dashboards, and writing your
+first Loki log query. If you only want reference material, skip ahead to
+[Architecture](#architecture).
+
+### 1 — Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) **24+** and Docker Compose
+  **v2** (included with Docker Desktop).
+- The repository cloned and a valid `.env` file (copy `.env.example`).
+
+Verify Docker is running:
+
+```bash
+docker info
+```
+
+### 2 — Start the full stack
+
+Run the following from the repository root. The `--build` flag rebuilds the
+backend/frontend images if you have local code changes:
+
+```bash
+docker compose up --build
+```
+
+On first run Docker pulls the Grafana, Loki, and Promtail images (~600 MB).
+Subsequent starts are much faster.
+
+Expected output once everything is healthy:
+
+```
+loki_1     | level=info ts=... msg="Loki started"
+promtail_1 | level=info ts=... msg="Promtail started"
+backend_1  | Server running on port 3001
+grafana_1  | logger=http.server t=... msg="HTTP Server Listen" address=[::]:3000
+```
+
+> **Tip:** Run `docker compose up -d` to start in detached mode and keep your
+> terminal free.
+
+### 3 — Verify each service
+
+| Service | URL | Expected response |
+|---------|-----|-------------------|
+| **Grafana** | http://localhost:3200 | Grafana login / home page |
+| **Loki** | http://localhost:3100/ready | `ready` |
+| **Backend API** | http://localhost:3001/api/v1/health | `{"status":"ok"}` |
+| **Backend metrics** | http://localhost:3001/metrics | Prometheus text format |
+
+> **Authentication:** The local Grafana instance is pre-configured with
+> anonymous viewer access — you can browse dashboards without logging in.
+> The default admin credentials are `admin` / `admin` (you will be prompted
+> to change the password on first login).
+
+### 4 — Access Grafana and open a dashboard
+
+1. Open http://localhost:3200 in your browser.
+2. Click the **Dashboards** icon (four squares) in the left sidebar.
+3. You will see two pre-provisioned dashboards:
+
+   | Dashboard | Description |
+   |-----------|-------------|
+   | **StellarKraal Backend** | HTTP request rate, error rate, latency percentiles, DB pool, RPC latency |
+   | **StellarKraal Logs** | Live log streams from all containers |
+
+4. Click **StellarKraal Logs** to open the log dashboard.
+
+> **No data on metric panels?** Prometheus is not yet provisioned in
+> `docker-compose.yml` (see [Known Gaps](#known-gaps)). Log panels work
+> immediately without Prometheus.
+
+### 5 — Import the loan dashboard JSON manually (optional)
+
+The dashboards are auto-provisioned from `grafana/dashboards/` via the
+mounted volume. If you have added a custom dashboard JSON file outside that
+directory, you can import it manually:
+
+1. In Grafana, click **Dashboards → Import**.
+2. Click **Upload JSON file** and select your dashboard JSON.
+3. Under **Options**, set the datasource to `Loki` (for log dashboards) or
+   `Prometheus` (for metric dashboards).
+4. Click **Import**.
+
+To make the dashboard permanent (survive container restarts), save the JSON to
+`grafana/dashboards/<name>.json` and restart Grafana:
+
+```bash
+docker compose restart grafana
+```
+
+Grafana reloads dashboard files from the mounted volume every 30 seconds, so
+a restart is only needed if you add a new file.
+
+### 6 — Write your first Loki log query
+
+Loki queries use **LogQL** — a log query language similar to PromQL. Follow
+these steps to explore logs in the Grafana Explore view:
+
+1. Click the **Explore** icon (compass) in the left sidebar.
+2. Make sure the datasource selector (top-left) shows **Loki**.
+3. Enter a query in the query editor.
+
+#### Basic queries
+
+**All backend logs:**
+
+```logql
+{container="backend"}
+```
+
+**Only error-level lines:**
+
+```logql
+{container="backend"} | json | level="error"
+```
+
+**Lines containing a keyword** (loan liquidations):
+
+```logql
+{container="backend"} |= "liquidat"
+```
+
+**Structured field filter** (slow requests over 500 ms):
+
+```logql
+{service="backend"} | json | duration > 500
+```
+
+**Rate of errors per minute** (metric query):
+
+```logql
+sum(rate({container="backend"} | json | level="error" [1m]))
+```
+
+#### Filtering by time range
+
+Use the time-range picker in the top-right corner of the Explore view. For
+active development, **Last 15 minutes** or **Last 1 hour** works well. For
+incident review, set an absolute range that covers the event window.
+
+#### Useful label selectors
+
+| Goal | LogQL |
+|------|-------|
+| All container logs | `{container=~"backend\|frontend"}` |
+| Promtail errors | `{container="promtail"}` |
+| Specific request ID | `{container="backend"} \|= "req-abc123"` |
+| Auth failures | `{container="backend"} \|= "Unauthorized"` |
+| RPC failures | `{service="backend"} \|= "rpc" \| level="error"` |
+| Rate-limited requests | `{container="backend"} \|= "Too many requests"` |
+
+> **Full LogQL reference:** https://grafana.com/docs/loki/latest/logql/
+
+### 7 — Tear down
+
+Stop all containers and remove the network:
+
+```bash
+docker compose down
+```
+
+To also delete the Grafana volume (resets all dashboard customisations):
+
+```bash
+docker compose down -v
+```
+
+---
+
 ## Architecture
 
 ```

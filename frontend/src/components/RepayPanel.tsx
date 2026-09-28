@@ -21,33 +21,21 @@ interface Props {
   initialAmount?: string;
 }
 
-interface OutstandingBalance {
-  outstanding: number; // stroops
-  principal: number; // stroops
-}
-
-interface RepaymentPreview {
-  remaining_balance: number;
-  breakdown: {
-    principal: number;
-    interest: number;
-    fees: number;
-    remaining_balance: number;
-  };
-  fully_repaid: boolean;
-  projected_health_factor_bps: number | null;
-}
-
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-
-const inputCls =
-  "w-full border border-brown/30 dark:border-gold/40 rounded-lg px-3 py-2 bg-white dark:bg-[#2A1A08] text-brown dark:text-cream placeholder:text-brown/40 dark:placeholder:text-cream/40 focus:outline-none focus:ring-2 focus:ring-gold dark:focus:ring-[#F5D060]";
 
 export default function RepayPanel({ walletAddress }: Props) {
   const router = useRouter();
   const [loanId, setLoanId] = useState("");
   const [amount, setAmount] = useState("");
-  const [loading, setLoading] = useState(false);
+  /**
+   * `submitting` tracks whether a repayment request is in-flight.
+   *
+   * — Closes #1204: the submit button is disabled immediately on the first
+   *   click and stays disabled until the network response (success OR error)
+   *   arrives, preventing duplicate submissions.
+   * — On error, `submitting` is set back to false so the user can retry.
+   */
+  const [submitting, setSubmitting] = useState(false);
   const [pendingHash, setPendingHash] = useState<string | null>(null);
   const [pendingError, setPendingError] = useState<string | null>(null);
   const [isStickyVisible, setIsStickyVisible] = useState(false);
@@ -71,8 +59,18 @@ export default function RepayPanel({ walletAddress }: Props) {
     return () => observer.disconnect();
   }, []);
 
+  /**
+   * Repayment handler — closes #1204.
+   *
+   * The button is disabled immediately on click via `submitting` state.
+   * The finally-block resets `submitting` to false on both success and error,
+   * so the user can retry after a failure.
+   */
   async function repay() {
-    setLoading(true);
+    // Guard: ignore if already in-flight (e.g. keyboard-Enter spamming)
+    if (submitting) return;
+
+    setSubmitting(true);
     setPendingError(null);
     try {
       const idempotencyKey =
@@ -103,8 +101,9 @@ export default function RepayPanel({ walletAddress }: Props) {
     } catch (e) {
       const { variant, message } = classifyApiError(e);
       toast[variant](message);
+      // Re-enable the button on error so the user can retry — closes #1204
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   }
 
@@ -130,6 +129,9 @@ export default function RepayPanel({ walletAddress }: Props) {
     mainButtonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
+  /** The button is disabled when a submission is in-flight or the network is wrong. */
+  const isButtonDisabled = submitting || networkMismatch;
+
   return (
     <>
       <Card
@@ -143,6 +145,8 @@ export default function RepayPanel({ walletAddress }: Props) {
             value={loanId}
             onChange={(e) => setLoanId(e.target.value)}
             type="number"
+            disabled={submitting}
+            aria-label="Loan ID"
           />
           <input
             className={`w-full ${colors.form.input} rounded-lg px-3 py-2 ${colors.text.primary} ${colors.form.placeholder}`}
@@ -150,17 +154,26 @@ export default function RepayPanel({ walletAddress }: Props) {
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             type="number"
+            disabled={submitting}
+            aria-label="Repayment amount in stroops"
           />
           <Tooltip hint="R — Repay loan">
+            {/*
+             * #1204: button is disabled immediately on first click (`submitting=true`)
+             * and re-enabled only after the response arrives (finally block).
+             * aria-disabled mirrors the disabled prop for AT compatibility.
+             */}
             <button
               ref={mainButtonRef}
               onClick={repay}
-              disabled={loading || networkMismatch}
+              disabled={isButtonDisabled}
+              aria-disabled={isButtonDisabled}
+              aria-label={submitting ? "Processing repayment…" : "Repay loan"}
               className={`w-full ${colors.secondary.bg} ${colors.secondary.text} py-2.5 rounded-xl font-semibold ${colors.secondary.hover} transition ${colors.interactive.disabled} ${colors.interactive.focus} flex items-center justify-center gap-2`}
             >
-              {loading ? (
+              {submitting ? (
                 <>
-                  <Spinner />
+                  <Spinner label="Processing repayment…" />
                   Processing…
                 </>
               ) : "Repay"}
@@ -177,15 +190,16 @@ export default function RepayPanel({ walletAddress }: Props) {
       </Card>
 
       {/* Sticky CTA for Mobile */}
-      <div 
+      <div
         className={`sm:hidden fixed bottom-0 left-0 right-0 p-4 bg-white dark:bg-[#1A1005] border-t border-brown/10 dark:border-gold/20 shadow-2xl z-50 transition-opacity duration-150 ${isStickyVisible ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
       >
         <button
           onClick={scrollToForm}
-          disabled={loading || networkMismatch}
-          className="w-full bg-gold text-brown py-3 rounded-xl font-bold shadow-md active:scale-[0.98] transition-transform"
+          disabled={isButtonDisabled}
+          aria-disabled={isButtonDisabled}
+          className="w-full bg-gold text-brown py-3 rounded-xl font-bold shadow-md active:scale-[0.98] transition-transform disabled:opacity-50"
         >
-          {loading ? "Processing…" : "Repay Loan"}
+          {submitting ? "Processing…" : "Repay Loan"}
         </button>
       </div>
     </>

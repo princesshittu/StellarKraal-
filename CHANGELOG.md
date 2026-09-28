@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Multi-platform Docker builds (`linux/amd64` + `linux/arm64`) via `docker buildx` in the container registry CI workflow. Images are pushed to GHCR as a single multi-arch manifest — Apple Silicon Macs pull the native `arm64` layer automatically. Expected CI build time with warm GHA cache: **< 10 min** per service. Cold build (no cache): ~12–15 min per service.
 - Pagination to GET /api/v1/collateral endpoint ([#588](https://github.com/teslims2/StellarKraal-/issues/588))
 - Idempotency key enforcement on loan creation ([#590](https://github.com/teslims2/StellarKraal-/issues/590))
 - Webhook retry with exponential backoff ([#592](https://github.com/teslims2/StellarKraal-/issues/592))

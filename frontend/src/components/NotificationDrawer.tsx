@@ -1,5 +1,6 @@
 "use client";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import FocusTrap from "focus-trap-react";
 import { Bell, X, CheckCheck, Trash2, AlertTriangle, CheckCircle, XCircle, TrendingDown, type LucideIcon } from "lucide-react";
 import { Icon } from "@/components/Icon";
@@ -23,13 +24,22 @@ interface NotificationItemProps {
   notification: LoanNotification;
   onRead: (id: string) => void;
   onDismiss: (id: string) => void;
+  /** Called when user clicks an item to navigate to its loan. */
+  onNavigate: (loanId: string) => void;
 }
 
-function NotificationItem({ notification: n, onRead, onDismiss }: NotificationItemProps) {
+function NotificationItem({ notification: n, onRead, onDismiss, onNavigate }: NotificationItemProps) {
   const { icon, className } = EVENT_ICONS[n.event] ?? EVENT_ICONS.loan_approved;
   const date = new Date(n.timestamp);
   const timeLabel = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const dateLabel = date.toLocaleDateString([], { month: "short", day: "numeric" });
+
+  function handleClick() {
+    onRead(n.id);
+    if (n.loanId) {
+      onNavigate(n.loanId);
+    }
+  }
 
   return (
     <motion.li
@@ -43,9 +53,9 @@ function NotificationItem({ notification: n, onRead, onDismiss }: NotificationIt
           ? "border-[color:var(--token-border)] bg-transparent"
           : "border-[color:var(--token-accent)]/30 bg-[color:var(--token-warning-subtle)] dark:bg-brown-800",
       ].join(" ")}
-      onClick={() => onRead(n.id)}
+      onClick={handleClick}
       role="article"
-      aria-label={`${n.read ? "Read" : "Unread"}: ${n.message}`}
+      aria-label={`${n.read ? "Read" : "Unread"}: ${n.message}${n.loanId ? ` — click to view loan ${n.loanId}` : ""}`}
     >
       {/* Event icon */}
       <span className={`mt-0.5 flex-shrink-0 ${className}`}>
@@ -118,6 +128,15 @@ export function NotificationDrawer({
   onDismissAll,
 }: NotificationDrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
+
+  // Issue #1210: mark all as read when drawer is opened
+  useEffect(() => {
+    if (open && unreadCount > 0) {
+      onMarkAllRead();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // Close on Escape
   useEffect(() => {
@@ -128,6 +147,18 @@ export function NotificationDrawer({
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [open, onClose]);
+
+  // Issue #1210: navigate to the relevant loan on notification click
+  const handleNavigate = useCallback(
+    (loanId: string) => {
+      onClose();
+      router.push(`/loans/${loanId}`);
+    },
+    [onClose, router],
+  );
+
+  // Issue #1210: show only the last 20 notifications
+  const visibleNotifications = notifications.slice(0, 20);
 
   return (
     <AnimatePresence>
@@ -247,12 +278,13 @@ export function NotificationDrawer({
                 ) : (
                   <ul className="flex flex-col gap-2" role="list" aria-label="Notification items">
                     <AnimatePresence initial={false}>
-                      {notifications.map((n) => (
+                      {visibleNotifications.map((n) => (
                         <NotificationItem
                           key={n.id}
                           notification={n}
                           onRead={onMarkRead}
                           onDismiss={onDismiss}
+                          onNavigate={handleNavigate}
                         />
                       ))}
                     </AnimatePresence>

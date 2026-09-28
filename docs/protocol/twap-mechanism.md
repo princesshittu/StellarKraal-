@@ -41,18 +41,32 @@ Where:
 
 ## Price Submission
 
-The oracle submits prices using:
+Prices can be submitted through single-oracle or multi-oracle methods:
 
+1. **Single Oracle Submission**:
 ```rust
 submit_price(oracle: Address, price: i128) -> Result<(), Error>
 ```
+The caller must be authorized (the legacy `ORACLE` or any registered trusted oracle). The price observation is appended to the ring buffer and the rolling TWAP is updated immediately.
+
+2. **Batch Multi-Oracle Submission**:
+```rust
+submit_oracle_prices(submitter: Address, prices: Vec<i128>) -> Result<OracleReport, Error>
+```
+Computes the median of submitted oracle prices upon reaching quorum, pushes the median observation to the TWAP ring buffer, and updates the rolling TWAP.
+
+3. **Incremental Multi-Oracle Submission**:
+```rust
+submit_price_from_oracle(oracle: Address, price: i128) -> Result<OracleReport, Error>
+```
+Records the individual oracle's price and, when `min_quorum` is met, computes the median and updates the TWAP ring buffer.
 
 ### Validation
 
-- Only the authorized oracle can submit prices
-- Price must be positive (> 0)
-- Price is added to TWAP calculation
-- TWAP is updated immediately
+- Only authorized oracles can submit prices
+- Price must be positive (> 0) and below `MAX_PRICE`
+- Observation is stored in the ring buffer (`DataKey::TwapSlot(head)`)
+- Rolling TWAP is updated immediately
 
 ### Example Flow
 
@@ -71,33 +85,40 @@ Time 1:30 - Oracle submits price 103
   TWAP = 103
 ```
 
-## Collateral Valuation
+## Collateral Valuation & TWAP Enforcement
 
-### Liquidations Use TWAP
+To prevent single-block oracle manipulation (e.g. flash-loan or compromised oracle price spikes artificially inflating borrow capacity), the protocol enforces TWAP clamping across all collateral valuation entry points:
 
-Liquidations use TWAP for collateral valuation to prevent manipulation:
+### Clamping Formula
 
-```rust
-// Liquidation uses TWAP price
-let twap_data = get_twap_data()?;
-let collateral_value_at_twap = collateral_count * twap_data.twap_price;
+When the current spot price (`last_price`) spikes above the time-weighted average price (`twap_price`) and at least `twap_min_observations` (default 2) have been recorded:
+
+```
+effective_collateral_value = total_collateral_value * twap_price / last_price
 ```
 
-### Loan Requests Use Spot Price (with sanity check)
+### Loan Requests
 
-Loan requests can use spot price for faster processing, but include a TWAP sanity check:
+In `request_loan()`, collateral borrowing capacity is evaluated against `effective_collateral_value`:
 
 ```rust
-// Loan request uses spot price
-let spot_price = get_twap_data()?.current_price;
-let collateral_value = collateral_count * spot_price;
+let effective_collateral_value = if twap_price > 0 && last_price > twap_price && twap_len >= min_obs {
+    total_collateral_value * twap_price / last_price
+} else {
+    total_collateral_value
+};
 
-// Sanity check: spot price shouldn't deviate too much from TWAP
-let max_deviation = 10%; // configurable
-if spot_price > twap_price * (1 + max_deviation) {
-    return Err(Error::PriceTooHigh);
+let max_loan = compute_ltv(effective_collateral_value, ltv)?;
+if amount > max_loan {
+    return Err(Error::InsufficientCollateral);
 }
 ```
+
+If an attacker spikes the spot price 5x in a single block, the effective collateral value is clamped down by `twap_price / last_price`, completely neutralizing the spike and rejecting any inflated loan requests with `Error::InsufficientCollateral`.
+
+### Health Factor & Liquidations
+
+Similarly, `health_factor()`, `recalculate_health_factor()`, and `liquidate()` use TWAP clamping to ensure that momentary price manipulation cannot deceive the protocol's risk engine or health checks.
 
 ## Querying TWAP Data
 
@@ -154,6 +175,17 @@ Passing `0` returns `InvalidAmount`.
 ```rust
 get_twap_window() -> u64
 ```
+
+### Updating TWAP Minimum Observations (Admin)
+
+The minimum number of observations required before TWAP clamping is enforced can be configured by the admin (default: 2):
+
+```rust
+set_twap_min_observations(admin: Address, min_obs: u32) -> Result<(), Error>
+get_twap_min_observations() -> u32
+```
+
+Passing `0` to `set_twap_min_observations` returns `Error::InvalidAmount`.
 
 ### Recommended Windows
 

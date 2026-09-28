@@ -1,11 +1,15 @@
 /**
- * GraphQL proof-of-concept tests (ADR-009 / issue #1076).
+ * GraphQL proof-of-concept tests (ADR-009 / issue #1076, #1220).
  *
  * Uses ApolloServer's built-in executeOperation() for isolated unit testing
  * of schema, resolvers, and validation without an HTTP server.
  *
  * The stellar SDK and contract services are mocked so this suite runs without
  * a live Soroban RPC connection (consistent with the rest of the unit tests).
+ *
+ * Changes in #1220:
+ * - loans query now returns LoanConnection (cursor-based + offset-based)
+ * - JWT auth middleware added to /graphql route (tested at integration level)
  */
 
 // ── Mocks (must be declared before module imports) ─────────────────────────
@@ -55,18 +59,17 @@ describe('GraphQL PoC', () => {
     await server.stop();
   });
 
-  // ── Query: loans ──────────────────────────────────────────────────────────
+  // ── Query: loans (LoanConnection) ─────────────────────────────────────────
 
   describe('Query.loans', () => {
-    it('returns a LoanPage with data and meta fields', async () => {
+    it('returns a LoanConnection with edges, pageInfo, and totalCount', async () => {
       const result = await server.executeOperation({
         query: `
           query {
             loans {
-              data { id borrower amount status }
-              total
-              page
-              limit
+              edges { cursor node { id borrower amount status } }
+              pageInfo { hasNextPage endCursor }
+              totalCount
             }
           }
         `,
@@ -76,11 +79,15 @@ describe('GraphQL PoC', () => {
       const body = result.body as { kind: 'single'; singleResult: { data?: unknown; errors?: unknown[] } };
       expect(body.singleResult.errors).toBeUndefined();
       const data = body.singleResult.data as {
-        loans: { data: unknown[]; total: number; page: number; limit: number };
+        loans: {
+          edges: { cursor: string; node: unknown }[];
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          totalCount: number;
+        };
       };
-      expect(data.loans.data).toBeInstanceOf(Array);
-      expect(data.loans.total).toBeGreaterThanOrEqual(0);
-      expect(data.loans.page).toBe(1);
+      expect(data.loans.edges).toBeInstanceOf(Array);
+      expect(data.loans.totalCount).toBeGreaterThanOrEqual(0);
+      expect(typeof data.loans.pageInfo.hasNextPage).toBe('boolean');
     });
 
     it('returns loans matching a status filter', async () => {
@@ -96,8 +103,8 @@ describe('GraphQL PoC', () => {
         query: `
           query {
             loans(status: active) {
-              data { id status }
-              total
+              edges { node { id status } }
+              totalCount
             }
           }
         `,
@@ -109,9 +116,91 @@ describe('GraphQL PoC', () => {
       };
       expect(body.singleResult.errors).toBeUndefined();
       const data = body.singleResult.data as {
-        loans: { data: { id: string; status: string }[]; total: number };
+        loans: { edges: { node: { id: string; status: string } }[]; totalCount: number };
       };
-      expect(data.loans.data.some((l) => l.id === 'gql-test-1')).toBe(true);
+      expect(data.loans.edges.some((e) => e.node.id === 'gql-test-1')).toBe(true);
+    });
+
+    it('returns cursor-based results when cursor arg is provided', async () => {
+      // Insert a loan to ensure there is at least one result
+      store.insertLoan({
+        id: 'gql-cursor-1',
+        borrower: 'GCURSOR',
+        collateral_id: 'cc1',
+        amount: 100,
+        status: 'active',
+      });
+
+      // First fetch without cursor to get endCursor
+      const first = await server.executeOperation({
+        query: `
+          query {
+            loans(limit: 100) {
+              edges { cursor node { id } }
+              pageInfo { endCursor hasNextPage }
+            }
+          }
+        `,
+      });
+
+      const firstBody = first.body as {
+        kind: 'single';
+        singleResult: { data?: unknown; errors?: unknown[] };
+      };
+      expect(firstBody.singleResult.errors).toBeUndefined();
+      const firstData = firstBody.singleResult.data as {
+        loans: {
+          edges: { cursor: string; node: { id: string } }[];
+          pageInfo: { endCursor: string | null };
+        };
+      };
+
+      // If there's at least one loan, use the cursor to get the next page
+      if (firstData.loans.edges.length > 0) {
+        const endCursor = firstData.loans.pageInfo.endCursor;
+        const second = await server.executeOperation({
+          query: `
+            query NextPage($cursor: String!) {
+              loans(cursor: $cursor, limit: 10) {
+                edges { node { id } }
+                pageInfo { hasNextPage endCursor }
+                totalCount
+              }
+            }
+          `,
+          variables: { cursor: endCursor },
+        });
+
+        const secondBody = second.body as {
+          kind: 'single';
+          singleResult: { data?: unknown; errors?: unknown[] };
+        };
+        expect(secondBody.singleResult.errors).toBeUndefined();
+        const secondData = secondBody.singleResult.data as {
+          loans: { edges: unknown[]; totalCount: number };
+        };
+        // After the last item there should be no more results
+        expect(secondData.loans.edges).toBeInstanceOf(Array);
+      }
+    });
+
+    it('throws BAD_USER_INPUT for a malformed cursor', async () => {
+      const result = await server.executeOperation({
+        query: `
+          query {
+            loans(cursor: "not-valid-base64-date!!!") {
+              edges { node { id } }
+            }
+          }
+        `,
+      });
+
+      const body = result.body as {
+        kind: 'single';
+        singleResult: { errors?: { extensions?: { code?: string } }[] };
+      };
+      expect(body.singleResult.errors).toBeDefined();
+      expect(body.singleResult.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
     });
   });
 
@@ -141,6 +230,38 @@ describe('GraphQL PoC', () => {
         collateral: { data: unknown[]; total: number };
       };
       expect(data.collateral.data).toBeInstanceOf(Array);
+    });
+
+    it('filters collateral by ownerId', async () => {
+      store.insertCollateral({
+        id: 'col-gql-1',
+        owner: 'GOWNER1',
+        animal_type: 'cattle',
+        count: 3,
+        appraised_value: 300_000,
+        status: 'available',
+      });
+
+      const result = await server.executeOperation({
+        query: `
+          query {
+            collateral(ownerId: "GOWNER1") {
+              data { id owner }
+              total
+            }
+          }
+        `,
+      });
+
+      const body = result.body as {
+        kind: 'single';
+        singleResult: { data?: unknown; errors?: unknown[] };
+      };
+      expect(body.singleResult.errors).toBeUndefined();
+      const data = body.singleResult.data as {
+        collateral: { data: { id: string; owner: string }[]; total: number };
+      };
+      expect(data.collateral.data.every((c) => c.owner === 'GOWNER1')).toBe(true);
     });
   });
 

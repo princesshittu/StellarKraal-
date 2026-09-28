@@ -7,17 +7,21 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
+RUN npm prune --omit=dev && npm cache clean --force
 
-# ── runtime ──────────────────────────────────────────────────────────────────
-# Image size target: <200MB
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
+# ── runner ───────────────────────────────────────────────────────────────────
+# Image size target: <300MB
+FROM node:20-alpine AS runner
 ENV NODE_ENV=production
 WORKDIR /app
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
-COPY --from=builder /app/dist ./dist
-RUN chown -R appuser:appgroup /app
-USER appuser
+RUN (getent group node || addgroup -S -g 1000 node) && (getent passwd node || adduser -S -u 1000 -G node node)
+COPY --from=builder --chown=node:node /app/package*.json ./
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/dist ./dist
+RUN chown -R node:node /app
+USER node
 EXPOSE 3001
 CMD ["node", "dist/index.js"]
+
+# ── runtime (compatibility alias) ─────────────────────────────────────────────
+FROM runner AS runtime

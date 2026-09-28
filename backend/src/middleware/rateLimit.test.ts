@@ -140,5 +140,10 @@ describe("Rate limiting middleware — Issue #374", () => {
       const { writeLimiter } = require("../middleware/rateLimit");
       expect(typeof writeLimiter).toBe("function");
     });
+
+    it("walletLimiter is configured and exported (#1221)", () => {
+      const { walletLimiter } = require("../middleware/rateLimit");
+      expect(typeof walletLimiter).toBe("function");
+    });
   });
 });

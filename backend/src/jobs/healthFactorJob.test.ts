@@ -1,6 +1,75 @@
-import { computeHealthFactor, runHealthFactorJob, _resetAlertCooldowns } from "./healthFactorJob";
+import {
+  computeHealthFactor,
+  simulateHealthFactor,
+  runHealthFactorJob,
+  _resetAlertCooldowns,
+} from "./healthFactorJob";
 import * as store from "../db/store";
 import * as alerting from "../utils/alerting";
+import { rpcClient } from "../utils/rpcClient";
+
+// ── Mock stellar-sdk and rpcClient ───────────────────────────────────────────
+
+jest.mock("@stellar/stellar-sdk", () => ({
+  Networks: {
+    TESTNET: "Test SDF Network ; September 2015",
+    PUBLIC: "Public Global Stellar Network ; September 2015",
+  },
+  BASE_FEE: "100",
+  Contract: jest.fn().mockImplementation(() => ({
+    call: jest.fn().mockReturnValue({}),
+  })),
+  TransactionBuilder: jest.fn().mockImplementation(() => ({
+    addOperation: jest.fn().mockReturnThis(),
+    setTimeout: jest.fn().mockReturnThis(),
+    build: jest.fn().mockReturnValue({ toXDR: () => "mock_xdr" }),
+  })),
+  nativeToScVal: jest.fn().mockReturnValue({}),
+  scValToNative: jest.fn((val) => val),
+}));
+
+jest.mock("../utils/rpcClient", () => ({
+  rpcClient: {
+    getAccount: jest.fn().mockResolvedValue({ id: "GACCOUNT", sequence: "1" }),
+    simulateTransaction: jest.fn(),
+  },
+}));
+
+// ── simulateHealthFactor ──────────────────────────────────────────────────────
+
+describe("simulateHealthFactor", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("calls rpcClient.simulateTransaction and returns numeric health factor", async () => {
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 12500 },
+    });
+
+    const hf = await simulateHealthFactor("101");
+    expect(rpcClient.simulateTransaction).toHaveBeenCalled();
+    expect(hf).toBe(12500);
+  });
+
+  it("returns null when simulation result has no retval", async () => {
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: {},
+    });
+
+    const hf = await simulateHealthFactor("102");
+    expect(hf).toBeNull();
+  });
+
+  it("handles RPC errors gracefully and returns null", async () => {
+    (rpcClient.simulateTransaction as jest.Mock).mockRejectedValue(
+      new Error("RPC node unreachable")
+    );
+
+    const hf = await simulateHealthFactor("103");
+    expect(hf).toBeNull();
+  });
+});
 
 // ── computeHealthFactor ───────────────────────────────────────────────────────
 
@@ -55,25 +124,12 @@ describe("runHealthFactorJob — threshold alerts", () => {
     };
   }
 
-  function makeCollateral(id: string, appraisedValue: number): store.CollateralRecord {
-    return {
-      id: `col-${id}`,
-      owner: "G1",
-      animal_type: "cattle",
-      count: 5,
-      appraised_value: appraisedValue,
-      appraisal_history: [],
-      createdAt: new Date().toISOString(),
-      deletedAt: null,
-    };
-  }
-
-  it("fires warning when HF is between CRIT (10000) and WARN (13000)", async () => {
-    // HF = (900 * 8000) / (600 * 10000) * 10000 = 12000 → between 10000 and 13000
+  it("fires warning when on-chain HF is between CRIT (10000) and WARN (13000)", async () => {
     const loan = makeLoan("loan-w", 600);
-    const col = makeCollateral("loan-w", 900);
     jest.spyOn(store, "listActiveLoans").mockReturnValue([loan]);
-    jest.spyOn(store, "getCollateral").mockReturnValue(col);
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 12000 },
+    });
     jest.spyOn(store, "updateLoan").mockReturnValue({ ...loan, health_factor: 12000, status: "active" });
 
     await runHealthFactorJob();
@@ -82,12 +138,12 @@ describe("runHealthFactorJob — threshold alerts", () => {
     expect(fireSpy.mock.calls[0][0].severity).toBe("warning");
   });
 
-  it("fires critical when HF is below CRIT (10000)", async () => {
-    // HF = (700 * 8000) / (600 * 10000) * 10000 = 9333 → below 10000
+  it("fires critical when on-chain HF is below CRIT (10000)", async () => {
     const loan = makeLoan("loan-c", 600);
-    const col = makeCollateral("loan-c", 700);
     jest.spyOn(store, "listActiveLoans").mockReturnValue([loan]);
-    jest.spyOn(store, "getCollateral").mockReturnValue(col);
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 9333 },
+    });
     jest.spyOn(store, "updateLoan").mockReturnValue({ ...loan, health_factor: 9333, status: "at_risk" });
 
     await runHealthFactorJob();
@@ -96,12 +152,12 @@ describe("runHealthFactorJob — threshold alerts", () => {
     expect(fireSpy.mock.calls[0][0].severity).toBe("critical");
   });
 
-  it("does not fire alert when HF is above WARN (13000)", async () => {
-    // HF = (1000 * 8000) / (600 * 10000) * 10000 = 13333 → above 13000
+  it("does not fire alert when on-chain HF is above WARN (13000)", async () => {
     const loan = makeLoan("loan-safe", 600);
-    const col = makeCollateral("loan-safe", 1000);
     jest.spyOn(store, "listActiveLoans").mockReturnValue([loan]);
-    jest.spyOn(store, "getCollateral").mockReturnValue(col);
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 13333 },
+    });
     jest.spyOn(store, "updateLoan").mockReturnValue({ ...loan, health_factor: 13333, status: "active" });
 
     await runHealthFactorJob();
@@ -111,16 +167,15 @@ describe("runHealthFactorJob — threshold alerts", () => {
 
   it("cooldown suppresses a second alert within 1 hour for the same loan", async () => {
     const loan = makeLoan("loan-cd", 600);
-    const col = makeCollateral("loan-cd", 700);
     jest.spyOn(store, "listActiveLoans").mockReturnValue([loan]);
-    jest.spyOn(store, "getCollateral").mockReturnValue(col);
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 9333 },
+    });
     jest.spyOn(store, "updateLoan").mockReturnValue({ ...loan });
 
     await runHealthFactorJob();
     await runHealthFactorJob(); // second run within the same process — cooldown active
 
-    // fireAlert is called but internally isCoolingDown suppresses the second; however
-    // maybeAlert itself gates before calling fireAlert, so it should only be called once.
     expect(fireSpy).toHaveBeenCalledTimes(1);
   });
 });
@@ -134,7 +189,7 @@ describe("runHealthFactorJob", () => {
     jest.spyOn(alerting, "fireAlert").mockResolvedValue(undefined);
   });
 
-  it("flags at_risk loans below threshold and returns updated count", async () => {
+  it("flags at_risk loans below threshold and updates on-chain health_factor", async () => {
     const loans: store.LoanRecord[] = [
       {
         id: "loan-1",
@@ -147,28 +202,27 @@ describe("runHealthFactorJob", () => {
         deletedAt: null,
       },
     ];
-    const collateral: store.CollateralRecord = {
-      id: "col-1",
-      owner: "G1",
-      animal_type: "cattle",
-      count: 5,
-      appraised_value: 700,
-      appraisal_history: [],
-createdAt: new Date().toISOString(),
-      deletedAt: null,
-    };
 
     jest.spyOn(store, "listActiveLoans").mockReturnValue(loans);
-    jest.spyOn(store, "getCollateral").mockReturnValue(collateral);
-    const updateSpy = jest.spyOn(store, "updateLoan").mockReturnValue({ ...loans[0], status: "at_risk", health_factor: 9333.33 });
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 9333 },
+    });
+    const updateSpy = jest.spyOn(store, "updateLoan").mockReturnValue({
+      ...loans[0],
+      status: "at_risk",
+      health_factor: 9333,
+    });
 
     const count = await runHealthFactorJob();
 
-    expect(updateSpy).toHaveBeenCalledWith("loan-1", expect.objectContaining({ status: "at_risk" }));
+    expect(updateSpy).toHaveBeenCalledWith(
+      "loan-1",
+      expect.objectContaining({ status: "at_risk", health_factor: 9333 })
+    );
     expect(count).toBe(1);
   });
 
-  it("keeps active status for safe loans", async () => {
+  it("keeps active status for safe loans and updates on-chain health_factor", async () => {
     const loans: store.LoanRecord[] = [
       {
         id: "loan-2",
@@ -181,29 +235,27 @@ createdAt: new Date().toISOString(),
         deletedAt: null,
       },
     ];
-    const collateral: store.CollateralRecord = {
-      id: "col-2",
-      owner: "G2",
-      animal_type: "cattle",
-      count: 5,
-      appraised_value: 1_000,
-      appraisal_history: [],
-createdAt: new Date().toISOString(),
-      deletedAt: null,
-    };
 
     jest.spyOn(store, "listActiveLoans").mockReturnValue(loans);
-    jest.spyOn(store, "getCollateral").mockReturnValue(collateral);
-    const updateSpy = jest.spyOn(store, "updateLoan").mockReturnValue({ ...loans[0], status: "active", health_factor: 13333.33 });
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 13333 },
+    });
+    const updateSpy = jest.spyOn(store, "updateLoan").mockReturnValue({
+      ...loans[0],
+      status: "active",
+      health_factor: 13333,
+    });
 
     const count = await runHealthFactorJob();
 
-    expect(updateSpy).toHaveBeenCalledWith("loan-2", expect.objectContaining({ status: "active" }));
+    expect(updateSpy).toHaveBeenCalledWith(
+      "loan-2",
+      expect.objectContaining({ status: "active", health_factor: 13333 })
+    );
     expect(count).toBe(1);
   });
 
   it("skips update when health_factor and status are unchanged", async () => {
-    const hf = (700 * 8_000) / (600 * 10_000) * 10_000;
     const loans: store.LoanRecord[] = [
       {
         id: "loan-3",
@@ -211,24 +263,16 @@ createdAt: new Date().toISOString(),
         collateral_id: "col-3",
         amount: 600,
         status: "at_risk",
-        health_factor: hf,
+        health_factor: 9333,
         createdAt: new Date().toISOString(),
         deletedAt: null,
       },
     ];
-    const collateral: store.CollateralRecord = {
-      id: "col-3",
-      owner: "G3",
-      animal_type: "cattle",
-      count: 5,
-      appraised_value: 700,
-      appraisal_history: [],
-createdAt: new Date().toISOString(),
-      deletedAt: null,
-    };
 
     jest.spyOn(store, "listActiveLoans").mockReturnValue(loans);
-    jest.spyOn(store, "getCollateral").mockReturnValue(collateral);
+    (rpcClient.simulateTransaction as jest.Mock).mockResolvedValue({
+      result: { retval: 9333 },
+    });
     const updateSpy = jest.spyOn(store, "updateLoan");
 
     const count = await runHealthFactorJob();
@@ -243,13 +287,23 @@ createdAt: new Date().toISOString(),
     expect(count).toBe(0);
   });
 
-  it("treats missing collateral as zero value (null HF, keeps active)", async () => {
+  it("handles simulation failure gracefully by skipping the loan", async () => {
     const loans: store.LoanRecord[] = [
       {
         id: "loan-4",
         borrower: "G4",
-        collateral_id: "col-missing",
+        collateral_id: "col-4",
         amount: 600,
+        status: "active",
+        health_factor: null,
+        createdAt: new Date().toISOString(),
+        deletedAt: null,
+      },
+      {
+        id: "loan-5",
+        borrower: "G5",
+        collateral_id: "col-5",
+        amount: 800,
         status: "active",
         health_factor: null,
         createdAt: new Date().toISOString(),
@@ -258,11 +312,20 @@ createdAt: new Date().toISOString(),
     ];
 
     jest.spyOn(store, "listActiveLoans").mockReturnValue(loans);
-    jest.spyOn(store, "getCollateral").mockReturnValue(undefined);
-    const updateSpy = jest.spyOn(store, "updateLoan").mockReturnValue({ ...loans[0] });
+    // First loan fails RPC, second loan succeeds
+    (rpcClient.simulateTransaction as jest.Mock)
+      .mockRejectedValueOnce(new Error("RPC Timeout"))
+      .mockResolvedValueOnce({ result: { retval: 11000 } });
 
-    await runHealthFactorJob();
+    const updateSpy = jest.spyOn(store, "updateLoan").mockReturnValue({ ...loans[1] });
 
-    expect(updateSpy).not.toHaveBeenCalled();
+    const count = await runHealthFactorJob();
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(
+      "loan-5",
+      expect.objectContaining({ health_factor: 11000, status: "active" })
+    );
+    expect(count).toBe(1);
   });
 });

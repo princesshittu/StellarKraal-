@@ -114,12 +114,20 @@ export default function StepReview() {
 
   const rate = TERM_RATES[loanTermDays] || '5%';
   const principal = Number.parseInt(loanAmount || '0', 10);
+  const appraisedValueInt = Number.parseInt(appraisedValue || '0', 10);
   const fee = Math.floor(principal * (Number.parseFloat(rate) / 100));
   const estimatedFirstInterest = Math.floor(principal * 0.01);
   const totalRepay = principal + fee;
+  // Round to 2 decimal places to prevent floating-point artefacts (e.g. 74.99999999%)
+  const ltvPct =
+    principal > 0 && appraisedValueInt > 0
+      ? ((principal / appraisedValueInt) * 100).toFixed(2)
+      : '0.00';
+  // origination fee as percentage of principal rounded to 2 d.p.
+  const feePct = principal > 0 ? ((fee / principal) * 100).toFixed(2) : '0.00';
   const healthFactor =
-    principal > 0 && appraisedValue
-      ? (Number.parseInt(appraisedValue, 10) / principal / 1.5).toFixed(2)
+    principal > 0 && appraisedValueInt > 0
+      ? (appraisedValueInt / principal / 1.5).toFixed(2)
       : '—';
   const animalLabel = `${animalType.charAt(0).toUpperCase()}${animalType.slice(1)}`;
   const breakdown = (
@@ -138,11 +146,15 @@ export default function StepReview() {
     { label: 'Animal Count', value: count },
     {
       label: <GlossaryTerm termKey="appraisal">Appraised Value</GlossaryTerm>,
-      value: `${Number.parseInt(appraisedValue || '0', 10).toLocaleString()} stroops`,
+      value: `${appraisedValueInt.toLocaleString()} stroops`,
     },
     {
       label: <GlossaryTerm termKey="loanAmount">Loan Amount</GlossaryTerm>,
       value: `${principal.toLocaleString()} stroops`,
+    },
+    {
+      label: <GlossaryTerm termKey="ltv">LTV</GlossaryTerm>,
+      value: `${ltvPct}%`,
     },
     { label: 'Loan Term', value: `${loanTermDays} days` },
     {
@@ -151,7 +163,7 @@ export default function StepReview() {
     },
     {
       label: <GlossaryTerm termKey="originationFee">Fee Amount</GlossaryTerm>,
-      value: `${fee.toLocaleString()} stroops`,
+      value: `${fee.toLocaleString()} stroops (${feePct}%)`,
     },
     {
       label: <GlossaryTerm termKey="repayment">Total to Repay</GlossaryTerm>,

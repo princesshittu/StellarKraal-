@@ -1,470 +1,315 @@
-# Runbook: Contract Invocation Failure
+# Runbook: High Contract Invocation Failure Rate
+
+## Alert Definition
+
+| Field | Value |
+|---|---|
+| Alert name | `HighContractInvocationFailureRate` |
+| Prometheus expression | `stellarkraal_alert_fired{rule="high-contract-invocation-failure-rate"} > 0` |
+| Evaluation window | `5m` |
+| Severity | `critical` |
+| PagerDuty escalation | Yes |
+| Cooldown | 5 minutes |
+| Runbook | `docs/runbooks/contract-invocation-failure.md` |
+| Dashboard | Grafana → StellarKraal Backend → `?var-alert=high-contract-invocation-failure-rate` |
+
+The alert fires when `fireAlert(rules.highContractInvocationFailureRate, …)` is called from application code — typically when Soroban RPC calls or contract invocations exceed the acceptable failure threshold. The in-process cooldown prevents re-firing within 5 minutes of the last fire, so a single page means the failure is sustained.
+
+Supporting metrics you can query in Grafana/Prometheus:
+
+```promql
+# Error rate of all Soroban RPC calls (last 5 minutes)
+sum(rate(rpc_call_duration_seconds_count{status="error"}[5m]))
+  / sum(rate(rpc_call_duration_seconds_count[5m]))
+
+# Per-operation breakdown (useful to narrow down which RPC call is failing)
+rate(rpc_call_duration_seconds_count{status="error"}[5m]) by (operation)
+
+# p99 latency of RPC calls — high latency can precede failures
+histogram_quantile(0.99,
+  sum(rate(rpc_call_duration_seconds_bucket[5m])) by (le, operation)
+)
+```
+
+---
 
 ## Incident Description
-Soroban smart contract calls from the backend are failing, causing operations like loan origination, repayment, and liquidation to return errors. This can be caused by contract errors, incorrect parameters, contract pause state, or RPC node issues.
 
-## Detection Steps
-- **Alerts**: Alerts firing for `ContractInvocationFailure`, `HighContractErrorRate`, or `BackendHigh5xxRate`.
-- **Grafana Dashboards**: Check the `StellarKraal RPC Metrics` dashboard. Look for spikes in contract error rates or 502 responses from the backend.
-- **Logs**: Search for `Contract error:`, `ContractError`, or specific error codes (e.g., `#3 Unauthorized`) in the backend logs.
+Soroban smart contract calls from the backend are failing at an elevated rate. This blocks user-facing operations including:
 
-## Impact Assessment
-- **Criticality**: High to Critical (depending on which operations are affected)
-- **User Impact**: Users cannot originate loans, make repayments, or perform any on-chain operations. Read-only queries may still work if the RPC is reachable.
+- Loan origination (`request_loan`)
+- Loan repayment (`repay_loan`)
+- Liquidations (`liquidate`)
+- Collateral registration (`register_livestock`)
 
-## Contract Error Codes
+Read-only API endpoints and database queries are unaffected unless the failure originates from a total RPC outage.
 
-The StellarKraal contract defines 19 error codes. Each code requires specific diagnosis and remediation steps.
+---
 
-### Error #1: Not Initialized
+## Common Causes
 
-**Message**: `Contract is not initialized`
+| Cause | Signals |
+|---|---|
+| Contract is paused (error #13 or #21) | All write operations fail with `Contract is paused` |
+| Circuit breaker open | `RpcCircuitOpen` alert also firing; logs show `Circuit breaker opened` |
+| RPC node unreachable | `RpcFailure` alert also firing; curl health check fails |
+| Wrong signer key (error #3) | Errors logged as `Unauthorized`, only certain operations fail |
+| Stale or invalid oracle prices (errors #17, #18) | Loan origination and liquidation fail; oracle logs show no recent submissions |
+| Bad transaction sequence number | Stellar-level `TX_BAD_SEQ` errors in logs |
+| `CONTRACT_ID` misconfigured | All contract calls fail; `stellar contract info` returns 404 |
+| Fee rate / parameter misconfiguration (errors #10, #12) | Admin operations fail; runtime errors during parameter updates |
+| Upgrade timelock not elapsed (error #25) | Upgrade execution fails after proposal |
+| Reentrancy guard triggered (error #20) | Unexpected concurrent calls to the same contract method |
+| Arithmetic overflow (error #22) | Edge-case amounts in loan or price calculations |
 
-**Cause**: The contract was deployed but `initialize()` has never been called.
+---
 
-**Diagnosis**:
+## Diagnostic Steps
+
+Work through these steps in order. Most incidents resolve at step 1, 2, or 3.
+
+### Step 1 — Check related alerts
+
+Before investigating the contract, look at what else is alerting:
+
+- **`RpcCircuitOpen` firing** → The opossum circuit breaker opened because ≥ 50% of calls failed in the last 10 s window. Go to the [RPC Failure Runbook](./rpc-failure.md) first. The contract is healthy; the transport layer is broken.
+- **`RpcFailure` firing** → Soroban RPC is intermittently failing. See [RPC Failure Runbook](./rpc-failure.md).
+- **`LiquidationFailure` firing** → Contract invocation failure may be a symptom of a broader liquidation engine issue. See [Liquidation Failure Runbook](./liquidation-failure.md).
+
+### Step 2 — Check RPC health
+
 ```bash
-# Query contract state to check if admin is set
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+  "$RPC_URL"
+```
+
+A healthy response returns `{"result":{"status":"healthy",...}}`. If this fails, the RPC node is down — see [RPC Failure Runbook](./rpc-failure.md). Contract-level diagnosis below is only relevant once the RPC is reachable.
+
+### Step 3 — Check contract pause state
+
+```bash
 stellar contract invoke \
-  --id $CONTRACT_ID \
+  --id "$CONTRACT_ID" \
   --network testnet \
   -- is_paused
 ```
-If this fails with error #1, the contract is not initialized.
 
-**Remediation**:
-1. Call `initialize()` with valid parameters (admin, oracle, token, treasury, LTV, liquidation threshold).
-2. This is a one-time operation and can only be performed by the deployer.
-3. If the contract is already in use, this indicates a deployment issue — escalate immediately.
+If the contract is paused, **all write operations will fail** (error #13). Check `#incidents` Slack for a planned maintenance pause. If this was unintended, an admin must call `unpause()` immediately (see error #13 remediation below).
 
----
+To see the expiry of a timed pause:
 
-### Error #2: Already Initialized
-
-**Message**: `Contract is already initialized`
-
-**Cause**: `initialize()` was called more than once.
-
-**Diagnosis**: Check deployment logs to confirm initialization was already completed.
-
-**Remediation**: No action needed. This error should never occur in production runtime — it indicates a deployment script issue. Ensure deploy scripts check initialization state before calling `initialize()`.
-
----
-
-### Error #3: Unauthorized
-
-**Message**: `Unauthorized: caller does not have the required permissions`
-
-**Cause**: The caller address does not match the expected owner/admin address for the operation (e.g., calling admin-only functions like `pause()`, `set_liquidation_threshold()`).
-
-**Diagnosis**:
 ```bash
-# Check which account the backend is using
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --network testnet \
+  -- is_paused_with_expiry
+```
+
+### Step 4 — Inspect backend logs for contract error codes
+
+Search Loki (or container logs) for contract error codes:
+
+```logql
+# Loki query — errors in the last 30 minutes
+{container="backend"} |= "Contract error" | json
+```
+
+```bash
+# Docker Compose
+docker compose logs backend --since 30m | grep -E "Contract error|contractError|Error\(Contract"
+```
+
+The backend's `mapSorobanError()` converts raw Soroban error strings like `Error(Contract, #4)` into the human-readable messages listed in the [Error Code Reference](#soroban-error-code-reference) below. Cross-reference the logged message or numeric code with that table.
+
+### Step 5 — Check circuit breaker states
+
+The backend health endpoint exposes circuit breaker state:
+
+```bash
+curl -s http://localhost:3001/health | jq '.circuitBreakers'
+```
+
+Example output when a breaker is open:
+
+```json
+{
+  "sendTransaction": "open",
+  "prepareTransaction": "closed",
+  "simulateTransaction": "closed",
+  "getAccount": "closed",
+  "getTransaction": "closed",
+  "getHealth": "closed"
+}
+```
+
+An open circuit means the breaker tripped due to sustained failures. It auto-resets after 60 seconds. If it keeps reopening, the underlying RPC is still degraded.
+
+### Step 6 — Verify contract deployment and `CONTRACT_ID`
+
+```bash
+stellar contract info \
+  --id "$CONTRACT_ID" \
+  --network testnet
+```
+
+A 404 or unexpected output means `CONTRACT_ID` points to the wrong contract or the contract has not been deployed to the current network. Compare `CONTRACT_ID` in your secrets manager / `.env` against the deployment record in `docs/deployment/contract-deployment.md`.
+
+### Step 7 — Check transaction sequence numbers
+
+Stale or duplicate transactions fail with Stellar-level errors before reaching contract logic. Search for these in logs:
+
+```bash
+docker compose logs backend --since 30m | grep -E "TX_BAD_SEQ|tx_insufficient_fee|tx_bad_auth"
+```
+
+Sequence number issues typically indicate concurrent requests from multiple backend instances submitting from the same source account. Ensure only one backend instance is active, or implement sequence-number locking.
+
+### Step 8 — Check the event listener (for event-driven paths)
+
+Contract invocation failures in the event listener (polling path) are separate from API-driven failures but can indicate the same underlying problems. Check event listener logs:
+
+```bash
+docker compose logs backend --since 30m | grep -E "poll_error|parse_error|event_listener"
+```
+
+The listener does not crash on RPC errors — it logs `contract.event.poll_error` and schedules the next poll. However, sustained poll errors alongside API failures confirm a broad RPC or contract issue.
+
+See the [Event Listener Lifecycle Guide](../guides/event-listener-lifecycle.md) for details on error handling, missed events, and polling interval tuning.
+
+---
+
+## Soroban Error Code Reference
+
+The StellarKraal contract defines 26 error codes. The backend translates raw Soroban error strings into these messages via `mapSorobanError()` in `backend/src/utils/sorobanErrors.ts`.
+
+| Code | Message | Primary cause | Typical remediation |
+|------|---------|---------------|---------------------|
+| #1 | Contract is not initialized | `initialize()` was never called | Call `initialize()` with correct parameters |
+| #2 | Contract is already initialized | `initialize()` called more than once | No-op; check deploy script for duplicate calls |
+| #3 | Unauthorized | Caller does not match stored admin/owner | Verify signer key; check `BACKEND_SIGNER_SECRET` |
+| #4 | Insufficient collateral | Loan amount exceeds `collateral_value × LTV` | Reduce loan amount; verify oracle prices and LTV config |
+| #5 | Loan not found | Loan ID does not exist on-chain | Check for off-chain/on-chain sync gap; return 404 to client |
+| #6 | Collateral not found | Collateral ID does not exist on-chain | Check for off-chain/on-chain sync gap; return 404 to client |
+| #7 | Health factor is safe | Liquidation attempted on a healthy loan | Wait for HF to drop; no action if intentional |
+| #8 | Invalid amount | Zero, negative, or overflow-causing value | Validate amounts in backend before submitting |
+| #9 | Loan is already closed | Repay/liquidate called on a settled loan | Return 409 to client; sync off-chain DB state |
+| #10 | Invalid fee rate | Fee rate exceeds 5% protocol cap | Reduce fee to ≤ 500 bps; call admin fee setter again |
+| #11 | Exceeds close factor | Repayment/liquidation exceeds close-factor cap | Split into partial repayments; admin can adjust close factor |
+| #12 | Invalid close factor | Close factor outside 1–10000 bps range | Set close factor to a value between 1 and 10000 |
+| #13 | Contract is paused | Admin triggered pause; write ops blocked (repayment allowed) | Admin calls `unpause(admin)`; check `#incidents` for planned maintenance |
+| #14 | Oracle already registered | Duplicate oracle registration attempt | No-op; verify oracle list before registering |
+| #15 | Oracle limit reached | Max oracle count hit | Remove an inactive oracle with `remove_oracle(admin, addr)` |
+| #16 | Oracle not found | Removing/updating a non-existent oracle | Verify address; oracle may already be removed |
+| #17 | Insufficient oracle quorum | Too few oracles have submitted recent prices | Check oracle infra; lower quorum or add oracles |
+| #18 | Invalid price | Oracle submitted zero/negative/out-of-bounds price | Investigate oracle data feed; review price bounds config |
+| #19 | Contract is not paused | `unpause()` called when contract is already active | No-op |
+| #20 | Reentrancy guard | Concurrent call already in progress | Reduce concurrency; check for duplicate requests in flight |
+| #21 | Contract is already paused | `pause()` called when already paused | No-op |
+| #22 | Arithmetic overflow | Extreme values causing u128 overflow | Validate amounts; check unit conversions (stroops vs XLM) |
+| #23 | Not a whitelisted liquidator | Caller address not on the liquidator whitelist | Add the address to the whitelist via admin function |
+| #24 | No upgrade pending | `execute_upgrade()` called before `propose_upgrade()` | Call `propose_upgrade()` first |
+| #25 | Timelock not elapsed | 24-hour upgrade delay has not passed | Wait until the timelock expires before executing the upgrade |
+| #26 | Oracle required | Attempted to remove the last oracle while active loans exist | Settle or migrate active loans first; or add another oracle before removing |
+
+### Detailed remediation for high-frequency errors
+
+#### Error #3 — Unauthorized
+
+```bash
+# Verify which account the backend is signing as
 echo $BACKEND_SIGNER_SECRET | stellar keys show
 
-# Compare with contract admin
+# Compare against the stored contract admin
 stellar contract invoke \
-  --id $CONTRACT_ID \
+  --id "$CONTRACT_ID" \
   --network testnet \
   -- get_admin
 ```
 
-**Remediation**:
-1. For user operations (loan requests, repayments): Verify the signed transaction includes the correct user signature.
-2. For admin operations: Ensure the backend is using the correct admin signing key.
-3. If the admin key has been rotated, update `BACKEND_SIGNER_SECRET` or equivalent secret in the deployment environment.
+For user-facing operations, verify the signed transaction includes the correct user signature (returned by `buildContractTx`). For admin operations, ensure `BACKEND_SIGNER_SECRET` in the secrets manager matches the account used during `initialize()`.
 
----
+#### Error #4 — Insufficient Collateral
 
-### Error #4: Insufficient Collateral
-
-**Message**: `Insufficient collateral: loan amount exceeds the maximum allowed by the LTV ratio`
-
-**Cause**: The requested loan amount is greater than `(total_collateral_value × LTV_BPS) / 10000`.
-
-**Diagnosis**:
 ```bash
 # Check current LTV ratio
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- get_ltv
+stellar contract invoke --id "$CONTRACT_ID" --network testnet -- get_ltv
 
-# Check collateral appraisal value
+# Check the collateral appraisal value
 stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- get_collateral \
-  --collateral_id <ID>
+  --id "$CONTRACT_ID" --network testnet \
+  -- get_collateral --collateral_id <ID>
 ```
 
-**Remediation**:
-1. **User-facing**: Inform the user they need to reduce their loan amount or add more collateral.
-2. **If this is unexpected**: Verify collateral appraisals are recent and accurate. Check if oracle price feeds are stale or incorrect.
-3. **If LTV is misconfigured**: Admin can update the LTV with `set_ltv(admin, new_ltv_bps)`.
+If legitimate loan amounts are being rejected, check whether oracle prices are stale (may also show as error #17 or #18 in adjacent calls).
 
----
-
-### Error #5: Loan Not Found
-
-**Message**: `Loan not found`
-
-**Cause**: The provided loan ID does not exist in contract storage.
-
-**Diagnosis**: Check if the loan ID exists in the off-chain database (`backend/dev.sqlite3` or production DB).
-
-**Remediation**:
-1. **Off-chain/on-chain sync issue**: If the loan exists off-chain but not on-chain, investigate the original `request_loan()` transaction. It may have failed silently.
-2. **User error**: User provided an incorrect loan ID. Return a 404 to the client.
-
----
-
-### Error #6: Collateral Not Found
-
-**Message**: `Collateral not found`
-
-**Cause**: The provided collateral ID does not exist, or the `collateral_ids` array is empty.
-
-**Diagnosis**: Query the contract to list registered collateral for the user:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- list_collateral \
-  --owner <USER_ADDRESS>
-```
-
-**Remediation**:
-1. **User error**: User provided an incorrect or non-existent collateral ID. Return a 404.
-2. **Data sync issue**: If collateral exists off-chain but not on-chain, investigate the original `register_livestock()` call.
-
----
-
-### Error #7: Health Factor is Safe
-
-**Message**: `Health factor is safe: loan is not eligible for liquidation`
-
-**Cause**: A liquidation attempt was made on a loan whose health factor is above the liquidation threshold.
-
-**Diagnosis**:
-```bash
-# Calculate current health factor
-# HF = (collateral_value × liquidation_threshold_bps) / (loan_amount × 10000)
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- get_loan \
-  --loan_id <ID>
-```
-
-**Remediation**:
-1. **Expected behavior**: The loan is healthy and should not be liquidated. No action needed.
-2. **If liquidation is urgent**: Wait for collateral prices to drop or the loan to accrue more interest (if interest accrual is implemented).
-3. **If health factor calculation is incorrect**: Check oracle price feeds and verify TWAP mechanism is functioning.
-
----
-
-### Error #8: Invalid Amount
-
-**Message**: `Invalid amount: value must be positive and must not cause overflow`
-
-**Cause**: A zero, negative, or overflow-causing amount was provided (e.g., loan amount, repayment amount, appraisal value).
-
-**Diagnosis**: Log the exact amount that triggered the error. Check for:
-- Zero values (`0`)
-- Values exceeding `u128::MAX`
-- Negative values (should be caught by type system, but check for underflows)
-
-**Remediation**:
-1. **Input validation**: Ensure the backend validates amounts before submitting to the contract.
-2. **If amounts are suspiciously large**: Investigate if there's a unit conversion issue (e.g., stroops vs XLM).
-
----
-
-### Error #9: Loan Already Closed
-
-**Message**: `Loan is already closed`
-
-**Cause**: An operation (repay, liquidate) was attempted on a loan that has already been fully repaid or liquidated.
-
-**Diagnosis**: Query the loan state:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- get_loan \
-  --loan_id <ID>
-```
-Check the `status` field. If it shows `Closed` or `Liquidated`, the loan cannot be modified.
-
-**Remediation**:
-1. **Expected behavior**: The loan is already settled. Return a 409 Conflict to the client.
-2. **Data sync issue**: Update the off-chain database to reflect the loan's closed state.
-
----
-
-### Error #10: Invalid Fee Rate
-
-**Message**: `Invalid fee rate: rate exceeds the protocol maximum of 5%`
-
-**Cause**: An admin attempted to set an origination fee or liquidation penalty above 500 bps (5%).
-
-**Diagnosis**: Check the value being set:
-```bash
-# Example: setting origination fee
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- set_origination_fee \
-  --admin <ADMIN_ADDRESS> \
-  --fee_bps 600  # ❌ exceeds 500 bps cap
-```
-
-**Remediation**:
-1. **Reduce the fee**: Call the admin function again with a value ≤ 500 bps.
-2. **If the cap is too low**: This is a protocol design decision. Raising the cap requires a contract upgrade.
-
----
-
-### Error #11: Exceeds Close Factor
-
-**Message**: `Exceeds close factor: repay amount is above the close-factor cap`
-
-**Cause**: A repayment or liquidation exceeds the close factor limit (e.g., trying to repay 100% of a large loan in a single transaction when the close factor is set to 50%).
-
-**Diagnosis**:
-```bash
-# Check current close factor
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- get_close_factor
-```
-
-**Remediation**:
-1. **User-facing**: Inform the user to make partial repayments that respect the close factor.
-2. **Admin action**: If the close factor is too restrictive, the admin can update it with `set_close_factor(admin, new_close_factor_bps)`.
-
----
-
-### Error #12: Invalid Close Factor
-
-**Message**: `Invalid close factor: value must be between 1 and 10000 bps`
-
-**Cause**: An admin attempted to set a close factor outside the valid range.
-
-**Diagnosis**: Check the value being set.
-
-**Remediation**: Call `set_close_factor()` with a value between 1 and 10000 (0.01% to 100%).
-
----
-
-### Error #13: Contract is Paused
-
-**Message**: `Contract is paused — new operations are temporarily disabled`
-
-**Cause**: The contract has been paused by the admin (e.g., during an incident or upgrade).
-
-**Diagnosis**:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- is_paused
-```
-
-**Remediation**:
-1. **Expected pause**: Wait for the admin to unpause the contract. Check incident channels for updates.
-2. **Unintended pause**: Admin should call `unpause(admin)` immediately.
-3. **If pause has expired but still shows as paused**: Check the `pause_expiry` ledger. If the expiry has passed, the contract should automatically allow operations again. If not, this is a contract bug — escalate to engineering.
-
----
-
-### Error #14: Oracle Already Registered
-
-**Message**: `Oracle is already registered`
-
-**Cause**: An admin attempted to register an oracle address that is already authorized.
-
-**Diagnosis**: List currently registered oracles:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- list_oracles
-```
-
-**Remediation**: No action needed unless the admin intended to register a different address. Verify the oracle address before retrying.
-
----
-
-### Error #15: Oracle Limit Reached
-
-**Message**: `Oracle limit reached: maximum number of oracles has been registered`
-
-**Cause**: The contract has a hard limit on the number of oracles (e.g., 10) and that limit has been reached.
-
-**Diagnosis**: Query the oracle count and list:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- list_oracles
-```
-
-**Remediation**:
-1. **Remove an inactive oracle**: Use `remove_oracle(admin, oracle_address)` to deregister an unused oracle.
-2. **If all oracles are active**: This is a protocol limit. Increasing the cap requires a contract upgrade.
-
----
-
-### Error #16: Oracle Not Found
-
-**Message**: `Oracle not found`
-
-**Cause**: An admin attempted to remove or update an oracle that is not registered.
-
-**Diagnosis**: Verify the oracle address:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- list_oracles
-```
-
-**Remediation**: Correct the oracle address and retry, or confirm the oracle was already removed.
-
----
-
-### Error #17: Insufficient Oracle Quorum
-
-**Message**: `Insufficient oracle quorum: not enough valid price submissions`
-
-**Cause**: A price-dependent operation (loan origination, liquidation) could not proceed because too few oracles have submitted recent price data.
-
-**Diagnosis**:
-```bash
-# Check recent oracle submissions
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- get_latest_price \
-  --asset <ASSET_SYMBOL>
-```
-
-**Remediation**:
-1. **Wait for oracle updates**: Oracles may be experiencing downtime or delays. Check oracle infrastructure and logs.
-2. **Lower quorum requirement**: Admin can adjust the minimum quorum with `set_oracle_quorum(admin, new_quorum)`.
-3. **Add more oracles**: If the quorum is set to a high number (e.g., 7 of 10) and many oracles are offline, register additional oracles or reduce the quorum.
-
----
-
-### Error #18: Invalid Price
-
-**Message**: `Invalid price: price value is out of bounds or otherwise invalid`
-
-**Cause**: An oracle submitted a price that is zero, negative, or outside acceptable bounds (e.g., exceeds a sanity-check threshold).
-
-**Diagnosis**: Check oracle submissions and contract logs for the rejected price value.
-
-**Remediation**:
-1. **Oracle issue**: Investigate the oracle that submitted the invalid price. It may have a data feed bug or misconfiguration.
-2. **Contract validation too strict**: If legitimate prices are being rejected, review the contract's price validation logic and adjust bounds if necessary (requires contract upgrade).
-
----
-
-### Error #19: Contract is Not Paused
-
-**Message**: `Contract is not paused`
-
-**Cause**: An admin attempted to call `unpause()` when the contract is already active.
-
-**Diagnosis**:
-```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- is_paused
-```
-
-**Remediation**: No action needed. This is expected behavior if the contract is already unpaused.
-
----
-
-## General Diagnosis Steps
-
-### 1. Verify Contract Initialization and Pause State
+#### Error #13 — Contract is Paused
 
 ```bash
-# Check if contract is initialized
+# Check pause status and expiry
+stellar contract invoke --id "$CONTRACT_ID" --network testnet -- is_paused_with_expiry
+```
+
+- If this is a **planned maintenance pause** → wait for the expiry or for an admin to call `unpause()`.
+- If this is an **unintended pause** → admin must call `unpause(admin)` immediately. Alert `#incidents`.
+- Note: repayments are still allowed while paused; only new loans and liquidations are blocked.
+
+#### Errors #17 / #18 — Oracle failures
+
+```bash
+# Check the latest oracle price for an asset
 stellar contract invoke \
-  --id $CONTRACT_ID \
-  --network testnet \
-  -- is_paused
-
-# Expected: returns true or false (not error #1)
+  --id "$CONTRACT_ID" --network testnet \
+  -- get_latest_price --asset <ASSET_SYMBOL>
 ```
 
-If the contract is paused, all write operations will fail with error #13.
+If prices are stale:
+1. Check oracle infrastructure and Cron jobs for oracle submission.
+2. The admin can lower the quorum requirement with `set_oracle_quorum(admin, new_quorum)` as a temporary measure.
+3. If prices are invalid (error #18), identify which oracle submitted the bad value from contract event logs.
 
-### 2. Check RPC Connectivity
+---
 
-```bash
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
-  $RPC_URL
-```
+## Remediation Summary
 
-If the RPC is unreachable, contract calls will fail at the transport layer before reaching the contract logic. See [RPC Failure Runbook](./rpc-failure.md).
-
-### 3. Inspect Transaction Logs
-
-If the backend submitted a transaction but the contract rejected it, the transaction result will contain the error code. Search backend logs for:
-```
-Contract error: #<NUMBER>
-```
-
-Cross-reference the number with the error code table above.
-
-### 4. Check Sequence Numbers
-
-Stale or duplicate transactions will fail with Stellar-level errors (not contract errors). Look for `TX_BAD_SEQ` or `tx_insufficient_fee` in RPC responses.
-
-### 5. Verify Contract Deployment
-
-Ensure the `CONTRACT_ID` environment variable matches the actual deployed contract:
-```bash
-stellar contract info \
-  --id $CONTRACT_ID \
-  --network testnet
-```
-
-If this returns a 404 or unexpected data, the `CONTRACT_ID` is incorrect.
+| Scenario | Immediate action | Longer-term fix |
+|---|---|---|
+| RPC transport failure | Switch to backup RPC URL; restart backend | Improve RPC provider redundancy |
+| Circuit breaker open | Wait 60 s for auto-reset; if it keeps opening, fix underlying RPC | Add retry budget and backoff config |
+| Contract paused (planned) | Wait for expiry | Communicate maintenance windows via status page |
+| Contract paused (unintended) | Admin calls `unpause(admin)` | Review who has admin key access |
+| Wrong signer key | Update `BACKEND_SIGNER_SECRET` in secrets manager; redeploy | Add key-rotation runbook and access control audit |
+| Oracle quorum failure | Lower quorum temporarily; fix oracle infra | Monitor oracle uptime; add more oracles |
+| `CONTRACT_ID` mismatch | Set correct contract ID in environment; redeploy | Add contract ID validation to startup health check |
+| Sequence number collision | Ensure single backend instance; restart to reset in-memory nonce | Implement distributed sequence locking for multi-replica setup |
+| Event listener stuck | Restart the backend (listener restarts with it); it will replay missed events from cursor `0` | Persist cursor to DB to avoid full replay on restart |
 
 ---
 
 ## Escalation Path
 
-1. **Error codes #1, #2, #3**: Likely a configuration or deployment issue. Escalate to **Platform/Infrastructure Engineer**.
-2. **Error codes #4, #5, #6, #7**: User-facing errors or data sync issues. Escalate to **Backend Engineer** to investigate off-chain database state.
-3. **Error codes #13, #14, #15, #16, #17, #18, #19**: Admin or oracle issues. Escalate to **Protocol/Smart Contract Team**.
-4. **If the contract is returning errors that don't match any of the 19 codes**: Escalate to **Smart Contract Team** immediately — this may indicate a contract bug or an unknown error state.
+1. **First 15 minutes** — Primary on-call investigates using the steps above. Acknowledge in `#incidents` Slack channel.
+2. **Error codes #1–#3 (config/deployment)** — Escalate to the **Platform / Infrastructure Engineer**.
+3. **Error codes #4–#9, #11–#12 (user-data or sync issues)** — Escalate to the **Backend Engineer** to investigate off-chain database state.
+4. **Error codes #13–#26 (admin, oracle, upgrade, reentrancy)** — Escalate to the **Smart Contract / Protocol Team**.
+5. **After 15 minutes with no resolution** — Page the Engineering Manager and post in `#incidents`.
+6. **P1 declaration** (full loan lifecycle blocked > 15 min) — File a post-mortem issue in GitHub per the on-call policy.
 
-If the incident persists for more than 15 minutes or affects critical operations (liquidations, repayments), notify:
-- `#incidents` Slack channel
-- **Engineering Manager**
-- **On-call SRE** via PagerDuty
+On-call assignments and contact details: [docs/ON_CALL_ROTATION.md](../ON_CALL_ROTATION.md).
 
 ---
 
 ## Related Runbooks
 
-- [RPC Node Unreachable](./rpc-failure.md)
-- [Database Connection Failure](./db-failure.md)
-- [Liquidation Failure](./liquidation-failure.md)
+- [RPC Node Unreachable](./rpc-failure.md) — transport-layer failures before reaching the contract
+- [Database Connection Failure](./db-failure.md) — off-chain DB issues that may accompany contract failures
+- [Liquidation Failure](./liquidation-failure.md) — liquidation-engine-specific failures
 
 ## Related Documentation
 
-- [Smart Contract Interface](../contracts/stellarkraal-interface.md) — Full contract API reference
-- [API Error Code Reference](../api-error-codes.md) — HTTP error codes and contract error mappings
-- [Observability](../observability.md) — Logs and metrics for contract calls
+- [Event Listener Lifecycle Guide](../guides/event-listener-lifecycle.md) — when the listener starts/stops, error handling, missed events, and replay behaviour
+- [Smart Contract Interface](../contracts/stellarkraal-interface.md) — full contract API reference including all function signatures and state changes
+- [API Error Code Reference](../api-error-codes.md) — HTTP status codes and contract error code mappings returned to clients
+- [Alerting Guide](../guides/alerting.md) — how `fireAlert` works, cooldown behaviour, Slack and PagerDuty integration
+- [Observability Stack](../observability.md) — Prometheus metrics, Loki/Grafana dashboards, and how to extend each

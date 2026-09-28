@@ -19,7 +19,9 @@ export default function StepAmount() {
     useWizard();
 
   const maxLoan = appraisedValue ? Math.floor(parseInt(appraisedValue) * 0.7) : 0; // 70% LTV
-  const ltv = loanAmount && maxLoan ? ((parseInt(loanAmount) / maxLoan) * 70).toFixed(1) : '0';
+  // Round LTV to 2 decimal places to avoid floating-point artefacts like 74.99999999%
+  const ltvRaw = loanAmount && maxLoan ? (parseInt(loanAmount) / parseInt(appraisedValue)) * 100 : 0;
+  const ltv = ltvRaw.toFixed(2);
   const healthFactor =
     loanAmount && appraisedValue
       ? (parseInt(appraisedValue) / parseInt(loanAmount) / 1.5).toFixed(2)

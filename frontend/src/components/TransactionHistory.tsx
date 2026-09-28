@@ -19,12 +19,23 @@ export interface Transaction {
   amount: number;
   status?: string;
   created_at: string;
+  /** Stellar transaction hash — links to Stellar Expert explorer. */
+  tx_hash?: string;
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 /** Canonical transaction types used for the type filter dropdown. */
 const TRANSACTION_TYPES = ['loan', 'repay', 'liquidate', 'Repayment', 'Disbursement'];
+
+/** Stellar Expert network segment derived from the app environment variable. */
+const STELLAR_NETWORK =
+  process.env.NEXT_PUBLIC_NETWORK === 'mainnet' ? 'public' : 'testnet';
+
+/** Build a Stellar Expert explorer URL for a given transaction hash. */
+function stellarExpertUrl(txHash: string): string {
+  return `https://stellar.expert/explorer/${STELLAR_NETWORK}/tx/${txHash}`;
+}
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
@@ -41,6 +52,24 @@ function TransactionRow({ tx }: { tx: Transaction }) {
       </td>
       <td className="py-2 text-sm">
         <StatusBadge status={tx.status} />
+      </td>
+      <td className="py-2 text-sm">
+        {tx.tx_hash ? (
+          <a
+            href={stellarExpertUrl(tx.tx_hash)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-[color:var(--token-accent)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--token-accent)]"
+            aria-label={`View transaction ${tx.tx_hash.slice(0, 8)}… on Stellar Expert`}
+          >
+            <svg aria-hidden="true" className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+            Explorer
+          </a>
+        ) : (
+          <span className="text-xs text-[color:var(--token-text-muted)]">—</span>
+        )}
       </td>
     </tr>
   );
@@ -83,6 +112,27 @@ function TransactionCard({ tx }: { tx: Transaction }) {
             <StatusBadge status={tx.status} />
           </dd>
         </div>
+        {tx.tx_hash && (
+          <div className="col-span-2">
+            <dt className="text-xs font-medium text-brown-500 dark:text-brown-300 uppercase tracking-wide">
+              On-chain
+            </dt>
+            <dd className="mt-0.5">
+              <a
+                href={stellarExpertUrl(tx.tx_hash)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-[color:var(--token-accent)] hover:underline break-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--token-accent)]"
+                aria-label={`View transaction ${tx.tx_hash.slice(0, 8)}… on Stellar Expert`}
+              >
+                <svg aria-hidden="true" className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+                View on Stellar Expert
+              </a>
+            </dd>
+          </div>
+        )}
       </dl>
     </li>
   );
@@ -110,7 +160,7 @@ function StatusBadge({ status }: { status?: string }) {
  * download of `transactions.csv`. No third-party library required.
  */
 function exportToCsv(transactions: Transaction[]): void {
-  const headers = ['ID', 'Loan ID', 'Type', 'Amount (XLM)', 'Date', 'Status'];
+  const headers = ['ID', 'Loan ID', 'Type', 'Amount (XLM)', 'Date', 'Status', 'Tx Hash'];
   const rows = transactions.map((tx) => [
     tx.id,
     tx.loan_id,
@@ -118,6 +168,7 @@ function exportToCsv(transactions: Transaction[]): void {
     formatXlmFromStroops(tx.amount),
     new Date(tx.created_at).toISOString(),
     tx.status ?? 'completed',
+    tx.tx_hash ?? '',
   ]);
 
   const csvContent = [headers, ...rows]
@@ -351,7 +402,7 @@ export default function TransactionHistory({
     );
   }
 
-  const { page, limit, totalPages, setPage, setLimit, slice } = usePagination(filtered.length);
+  const { page, limit, totalPages, setPage, setLimit, slice } = usePagination(filtered.length, 20);
   const paginated = slice(filtered);
 
   if (filtered.length === 0 && !typeFilter && !dateFrom && !dateTo) {
@@ -454,31 +505,38 @@ export default function TransactionHistory({
                 >
                   <th
                     scope="col"
-                    className="w-1/4 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
+                    className="w-1/5 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
                                text-brown-500 dark:text-stone-400"
                   >
                     Type
                   </th>
                   <th
                     scope="col"
-                    className="w-1/4 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
+                    className="w-1/5 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
                                text-brown-500 dark:text-stone-400"
                   >
                     Amount
                   </th>
                   <th
                     scope="col"
-                    className="w-1/4 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
+                    className="w-1/5 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
                                text-brown-500 dark:text-stone-400"
                   >
                     Date
                   </th>
                   <th
                     scope="col"
-                    className="w-1/4 py-3 text-xs font-semibold uppercase tracking-wide
+                    className="w-1/5 py-3 pr-4 text-xs font-semibold uppercase tracking-wide
                                text-brown-500 dark:text-stone-400"
                   >
                     Status
+                  </th>
+                  <th
+                    scope="col"
+                    className="w-1/5 py-3 text-xs font-semibold uppercase tracking-wide
+                               text-brown-500 dark:text-stone-400"
+                  >
+                    Explorer
                   </th>
                 </tr>
               </thead>

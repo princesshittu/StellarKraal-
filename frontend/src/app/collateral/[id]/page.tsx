@@ -23,6 +23,14 @@ const TransactionHistory = dynamic(() => import("@/components/TransactionHistory
   ssr: false,
   loading: () => <DetailSkeleton />,
 });
+// Issue #1209: Recharts-based appraisal history chart — lazy loaded
+const AppraisalHistoryChart = dynamic(
+  () => import("@/components/AppraisalHistoryChart"),
+  {
+    ssr: false,
+    loading: () => <DetailSkeleton />,
+  },
+);
 
 interface AppraisalEntry {
   date: string;
@@ -292,6 +300,11 @@ export default function CollateralDetailPage() {
           url={`${API}/api/v1/collateral/${id}/appraisals`}
           label="Price History"
         />
+      </div>
+
+      {/* Appraisal history chart (Recharts) — Issue #1209 */}
+      <div className="mt-6 no-print" data-print="hide">
+        <AppraisalHistoryChart collateralId={record.id} />
       </div>
 
       {/* Liquidation threshold — #697 */}

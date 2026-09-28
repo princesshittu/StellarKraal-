@@ -185,9 +185,237 @@ The script (`scripts/verify-deployment.ts`) checks configuration, RPC health, an
 - **Logs:** Use [container logs runbook](../runbooks/container-logs.md) patterns with the staging compose files.
 - **Troubleshooting:** [docs/troubleshooting.md](../troubleshooting.md) for CORS, JWT, RPC, and migration issues.
 
+## Terraform Infrastructure Deployment
+
+StellarKraal's AWS infrastructure (ECS Fargate, RDS, S3, VPC, SNS/CloudWatch alerting) is
+managed with Terraform. This section covers how to run Terraform commands locally for the
+staging environment, and what to do when something goes wrong.
+
+For CI-driven Terraform runs, see the [`terraform.yml`](../../.github/workflows/terraform.yml)
+workflow and the [CI/CD guide](../guides/ci-cd.md#infrastructure-terraform).
+
+---
+
+### Prerequisites
+
+Before running any Terraform command locally, ensure the following are installed and configured:
+
+| Requirement | Minimum version | Notes |
+|-------------|-----------------|-------|
+| [Terraform CLI](https://developer.hashicorp.com/terraform/downloads) | **1.6+** | Verify: `terraform version` |
+| [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) | **2.x** | Verify: `aws --version` |
+| AWS credentials | — | Use IAM role or `aws configure`; see below |
+| S3 remote state bucket | — | Value in the `TF_STATE_BUCKET` GitHub variable |
+
+#### AWS credentials
+
+The CI workflow uses OIDC (no long-lived keys). For local runs, authenticate with the AWS
+CLI using a profile or environment variables:
+
+```bash
+# Option A — named profile (recommended)
+aws configure --profile stellarkraal-staging
+export AWS_PROFILE=stellarkraal-staging
+
+# Option B — environment variables
+export AWS_ACCESS_KEY_ID="<your-key>"
+export AWS_SECRET_ACCESS_KEY="<your-secret>"
+export AWS_REGION="us-east-1"   # or your configured region
+```
+
+Verify your identity before proceeding:
+
+```bash
+aws sts get-caller-identity
+# Expected output:
+# {
+#   "UserId": "AIDAEXAMPLEID",
+#   "Account": "123456789012",
+#   "Arn": "arn:aws:iam::123456789012:user/your-username"
+# }
+```
+
+---
+
+### Step 1 — Initialise the workspace
+
+Run `terraform init` from the `infrastructure/` directory. This downloads provider plugins and
+configures the S3 remote backend.
+
+```bash
+cd infrastructure
+
+terraform init \
+  -backend-config="bucket=${TF_STATE_BUCKET}" \
+  -backend-config="key=staging/terraform.tfstate" \
+  -backend-config="region=${AWS_REGION}"
+```
+
+Expected output (abbreviated):
+
+```
+Initializing the backend...
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching "~> 5.0"...
+- Installing hashicorp/aws v5.x.x...
+
+Terraform has been successfully initialized!
+```
+
+If you see `Error: Failed to get existing workspaces`, confirm the S3 bucket exists and your
+credentials have `s3:GetObject` / `s3:PutObject` permissions on it.
+
+Select (or create) the staging workspace:
+
+```bash
+terraform workspace select staging || terraform workspace new staging
+```
+
+---
+
+### Step 2 — Review the plan
+
+Generate a plan to see exactly what Terraform would change. **Always review the plan before
+applying**, especially for the staging environment.
+
+```bash
+terraform plan \
+  -var-file="staging.tfvars" \
+  -out=staging.tfplan
+```
+
+Expected output (abbreviated):
+
+```
+Terraform used the selected providers to generate the following execution plan.
+Resource actions are indicated with the following symbols:
+  ~ update in-place
+  + create
+
+Plan: 2 to add, 1 to change, 0 to destroy.
+```
+
+Key things to check in the plan output:
+
+- **Destroys** (`-`) — any resource being destroyed should be intentional. A surprise destroy
+  on an ECS service, RDS instance, or S3 bucket warrants investigation before applying.
+- **Replacements** (`-/+`) — indicate the resource must be torn down and re-created. Verify
+  the replacement is acceptable (no data loss).
+- **In-place updates** (`~`) — least disruptive; review the attribute changes shown.
+
+The plan is saved to `staging.tfplan` so the apply step uses exactly the reviewed plan.
+
+---
+
+### Step 3 — Apply
+
+Apply the saved plan:
+
+```bash
+terraform apply staging.tfplan
+```
+
+Expected output (abbreviated):
+
+```
+aws_ecs_service.backend: Modifying... [id=arn:aws:ecs:us-east-1:...]
+aws_ecs_service.backend: Modifications complete after 12s
+
+Apply complete! Resources: 2 added, 1 changed, 0 destroyed.
+
+Outputs:
+  staging_api_url     = "https://api-staging.stellarkraal.example.com"
+  staging_frontend_url = "https://staging.stellarkraal.example.com"
+```
+
+After apply completes, run the [post-deployment validation](#post-deployment-validation) steps
+to confirm the staging stack is healthy.
+
+---
+
+### Rollback procedure
+
+#### Option A — Revert via a previous state snapshot (preferred)
+
+Terraform state is versioned in S3 (if versioning is enabled on the bucket). To roll back
+infrastructure to a prior state:
+
+1. List available state versions in the S3 console or via the AWS CLI:
+   ```bash
+   aws s3api list-object-versions \
+     --bucket "${TF_STATE_BUCKET}" \
+     --prefix "staging/terraform.tfstate" \
+     --query 'Versions[*].{VersionId:VersionId,LastModified:LastModified}' \
+     --output table
+   ```
+2. Download the desired previous state:
+   ```bash
+   aws s3api get-object \
+     --bucket "${TF_STATE_BUCKET}" \
+     --key "staging/terraform.tfstate" \
+     --version-id "<target-version-id>" \
+     terraform.tfstate.backup
+   ```
+3. Push it as the current state:
+   ```bash
+   terraform state push terraform.tfstate.backup
+   ```
+4. Run `terraform plan` to confirm the state matches the desired infrastructure, then `terraform apply` to reconcile any drift.
+
+#### Option B — Revert the code change and re-apply
+
+If the infrastructure drift was introduced by a code change (e.g., a variable change in
+`staging.tfvars`):
+
+1. Revert the change in the `infrastructure/` directory (git revert or manual edit).
+2. Run `terraform plan -var-file="staging.tfvars"` to confirm the plan restores the previous state.
+3. Run `terraform apply` to apply the restore plan.
+
+This is the preferred option for most day-to-day mistakes (wrong variable value, wrong image
+tag, etc.).
+
+#### Option C — Destroy and re-create a single resource
+
+For a single misbehaving resource (e.g., an ECS task definition that won't start):
+
+```bash
+# Taint the resource so the next apply replaces it
+terraform taint aws_ecs_task_definition.backend
+
+# Preview the replacement
+terraform plan -var-file="staging.tfvars"
+
+# Apply the replacement
+terraform apply -var-file="staging.tfvars"
+```
+
+> **Warning:** `terraform taint` schedules the resource for destruction and re-creation on
+> the next apply. Do not taint stateful resources (RDS instances, S3 buckets) without
+> understanding the data implications.
+
+---
+
+### Common Terraform errors and resolutions
+
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `Error: configuring Terraform AWS Provider: no valid credential sources found` | AWS credentials not configured | Run `aws configure` or export `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` |
+| `Error: Failed to get existing workspaces: S3 bucket does not exist` | S3 backend bucket missing or wrong name | Confirm `TF_STATE_BUCKET` matches an existing bucket in the correct region; create the bucket if necessary |
+| `Error: Invalid AWS Region: ` | `AWS_REGION` not set | Export `AWS_REGION` or pass `-backend-config="region=us-east-1"` to `terraform init` |
+| `Error acquiring the state lock` | Another `terraform apply` is in progress, or a previous run crashed without releasing the lock | Wait for the other run to complete, or force-unlock: `terraform force-unlock <lock-id>` (confirm no active apply first) |
+| `Error: creating ECS Service … Fargate requires task definition with networkMode awsvpc` | Task definition uses wrong network mode | Ensure the ECS task definition in Terraform uses `network_mode = "awsvpc"` |
+| `Error: Error modifying RDS Instance … Cannot upgrade to a lower version` | Downgrading the RDS engine version | Engine downgrades are not supported; restore from a snapshot instead |
+| `Error: timeout waiting for ECS Service ... to reach steady state` | ECS tasks failing health checks or crashing on startup | Check ECS task logs in CloudWatch: `aws logs tail /ecs/stellarkraal-staging-backend --follow` |
+| `Plan: X to destroy` unexpectedly | Resource configuration changed in a way Terraform cannot update in-place | Review which attribute triggered the replacement; check if a `lifecycle { prevent_destroy = true }` block should be added |
+| `InvalidClientTokenId: The security token included in the request is invalid` | Expired or wrong AWS credentials | Re-authenticate: `aws sso login` or refresh the session token |
+
+---
+
 ## Related documentation
 
 - [STAGING.md](../../STAGING.md) — additional staging notes (verify against this guide for CI behavior).
 - [README staging section](../../README.md#staging-environment)
+- [CI/CD guide — Infrastructure (Terraform)](../guides/ci-cd.md#infrastructure-terraform)
+- [Infrastructure Terraform reference](../infrastructure/terraform.md)
 - [Secrets rotation](../security/secrets-rotation.md)
 - [Docker Compose variants](../guides/docker.md#compose-file-variants)

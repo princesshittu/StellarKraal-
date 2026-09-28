@@ -4,6 +4,21 @@ import logger from "../utils/logger";
 import { fireAlert } from "../utils/alerting";
 import { config } from "../config";
 
+import {
+  Contract,
+  TransactionBuilder,
+  BASE_FEE,
+  Networks,
+  nativeToScVal,
+  scValToNative,
+} from "@stellar/stellar-sdk";
+import { rpcClient } from "../utils/rpcClient";
+
+const NETWORK_PASSPHRASE =
+  config.NEXT_PUBLIC_NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
+const CONTRACT_ID = config.CONTRACT_ID;
+const SIMULATION_ACCOUNT = "GASPH4OCYOERATXIKLPNURXUP7ISAQU2KWFB5XLUJ3LQHKHOCN3CEGD6";
+
 const LIQUIDATION_THRESHOLD_BPS = 8_000;
 const SCALE = 10_000;
 /** One hour in milliseconds — cooldown between repeated alerts for the same loan. */
@@ -62,7 +77,51 @@ async function maybeAlert(loanId: string, level: "warning" | "critical", hf: num
 }
 
 /**
- * Compute health factor (scaled by 10_000) for a loan.
+ * Simulate the on-chain `health_factor` contract view call for a loan.
+ * @param loanId - Loan identifier (number or string representation).
+ * @returns The simulated health factor (scaled by 10,000), or null if the RPC call fails or returns empty.
+ */
+export async function simulateHealthFactor(loanId: string): Promise<number | null> {
+  try {
+    let numericId: bigint;
+    try {
+      numericId = BigInt(loanId);
+    } catch {
+      const digits = loanId.replace(/\D/g, "");
+      numericId = digits.length > 0 ? BigInt(digits) : BigInt(1);
+    }
+
+    const contract = new Contract(CONTRACT_ID);
+    const account = (await rpcClient.getAccount(SIMULATION_ACCOUNT)) as any;
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        contract.call("health_factor", nativeToScVal(numericId, { type: "u64" }))
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await rpcClient.simulateTransaction(tx);
+    const retval = (sim as any)?.result?.retval;
+    if (retval === undefined || retval === null) {
+      return null;
+    }
+    const nativeVal = scValToNative(retval);
+    const hfNum = Number(nativeVal);
+    return Number.isFinite(hfNum) ? hfNum : null;
+  } catch (error) {
+    logger.warn("healthFactorJob: simulateHealthFactor failed", {
+      loanId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * Compute health factor (scaled by 10_000) for a loan locally (fallback / utility).
  * HF = (collateral_value × liq_threshold_bps) / (outstanding × 10_000) × 10_000
  * Returns null when collateral is missing or outstanding is zero.
  * @param collateralValue - Current appraised value of the collateral.
@@ -75,8 +134,8 @@ export function computeHealthFactor(collateralValue: number, outstanding: number
 }
 
 /**
- * Recalculate health factors for all active/at_risk loans, flag those below CRIT
- * threshold, and fire configurable warning/critical alerts with per-loan cooldown.
+ * Recalculate health factors for all active/at_risk loans by querying the on-chain contract,
+ * flag those below CRIT threshold, and fire configurable warning/critical alerts with per-loan cooldown.
  * @returns The number of loan records updated.
  */
 export async function runHealthFactorJob(): Promise<number> {
@@ -87,10 +146,23 @@ export async function runHealthFactorJob(): Promise<number> {
   let updated = 0;
 
   for (const loan of loans) {
-    const collateral = getCollateral(loan.collateral_id);
-    const collateralValue = collateral?.appraised_value ?? 0;
-    const hf = computeHealthFactor(collateralValue, loan.amount);
-    const newStatus = hf !== null && hf < SCALE ? "at_risk" : "active";
+    let hf: number | null = null;
+    try {
+      hf = await simulateHealthFactor(loan.id);
+    } catch (err) {
+      logger.warn("healthFactorJob: failed to fetch health factor for loan", {
+        loanId: loan.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
+    if (hf === null) {
+      // Gracefully skip loan if simulation fails or returns null
+      continue;
+    }
+
+    const newStatus = hf < SCALE ? "at_risk" : "active";
 
     if (loan.health_factor !== hf || loan.status !== newStatus) {
       updateLoan(loan.id, { health_factor: hf, status: newStatus });
@@ -98,12 +170,10 @@ export async function runHealthFactorJob(): Promise<number> {
     }
 
     // Fire alerts based on configurable thresholds
-    if (hf !== null) {
-      if (hf < CRIT_THRESHOLD) {
-        await maybeAlert(loan.id, "critical", hf);
-      } else if (hf < WARN_THRESHOLD) {
-        await maybeAlert(loan.id, "warning", hf);
-      }
+    if (hf < CRIT_THRESHOLD) {
+      await maybeAlert(loan.id, "critical", hf);
+    } else if (hf < WARN_THRESHOLD) {
+      await maybeAlert(loan.id, "warning", hf);
     }
   }
 

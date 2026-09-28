@@ -25,7 +25,9 @@ The interactive OpenAPI / Swagger UI is served at:
 ## Step 1 — Obtain a JWT
 
 The API uses a wallet-based challenge–sign–login flow. You need a Stellar key pair and a
-signature tool (`stellar-cli` or Freighter) to complete it.
+signature tool (`stellar-cli` or Freighter) to complete it. For a visual overview of the full
+flow — including token refresh and logout — see the
+[Authentication Flow Diagram](../auth-flow.md#authentication-flow-diagram).
 
 ### 1a. Fetch a one-time challenge
 

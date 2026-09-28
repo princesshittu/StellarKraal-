@@ -253,8 +253,6 @@ function ContrastRow({ fg, bg, label }: { fg: string; bg: string; label: string 
 // Page
 // ---------------------------------------------------------------------------
 
-export const metadata = { title: 'Color Palette — StellarKraal Design Tokens' };
-
 export default function ColorPalettePage() {
   return (
     <main

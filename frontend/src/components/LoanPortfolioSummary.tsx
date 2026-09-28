@@ -16,11 +16,13 @@ export interface PortfolioLoan {
 
 interface Props {
   loans: PortfolioLoan[];
+  /** When true, render skeleton placeholders for the stat cards — closes #1205. */
+  loading?: boolean;
 }
 
 type SortKey = 'date' | 'status';
 
-export default function LoanPortfolioSummary({ loans }: Props) {
+export default function LoanPortfolioSummary({ loans, loading = false }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [page, setPage] = useState(1);
   const pageSize = 8;
@@ -68,7 +70,7 @@ export default function LoanPortfolioSummary({ loans }: Props) {
           </select>
         </label>
       </div>
-      <LoanSummaryCards summary={summary} />
+      <LoanSummaryCards summary={summary} loading={loading} />
       {visibleLoans.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-brown/30 p-8 text-center text-brown/70">
           No loans yet. Your completed and active loans will appear here.

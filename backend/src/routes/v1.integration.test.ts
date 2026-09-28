@@ -30,11 +30,8 @@ jest.mock('../utils/logger', () => ({
   })),
 }));
 
-jest.mock('@stellar/stellar-sdk', () => {
-  const actual = jest.requireActual('@stellar/stellar-sdk');
-  return {
-    ...actual,
-    Networks: {
+jest.mock('@stellar/stellar-sdk', () => ({
+  Networks: {
       TESTNET: 'Test SDF Network ; September 2015',
       PUBLIC: 'Public Global Stellar Network ; September 2015',
     },
@@ -51,10 +48,30 @@ jest.mock('@stellar/stellar-sdk', () => {
       toScVal: jest.fn().mockReturnValue({}),
     })),
     nativeToScVal: jest.fn().mockReturnValue({}),
+    scValToNative: jest.fn().mockReturnValue({}),
+    StrKey: {
+      isValidEd25519PublicKey: jest.fn((key: string) => typeof key === 'string' && key.startsWith('G') && key.length === 56),
+    },
     xdr: {
       ScVal: {
         scvVec: jest.fn((arr) => ({ type: 'vec', value: arr })),
+        scvVoid: jest.fn().mockReturnValue({}),
       },
+    },
+    rpc: {
+      Server: jest.fn().mockImplementation(() => ({
+        getAccount: jest
+          .fn()
+          .mockResolvedValue({
+            id: 'GASPH4OCYOERATXIKLPNURXUP7ISAQU2KWFB5XLUJ3LQHKHOCN3CEGD6',
+            sequence: '1',
+          }),
+        prepareTransaction: jest.fn().mockResolvedValue({ toXDR: () => 'prepared_xdr' }),
+        simulateTransaction: jest.fn().mockResolvedValue({
+          result: { retval: { value: 150 } },
+        }),
+        getHealth: jest.fn().mockResolvedValue({ status: 'healthy' }),
+      })),
     },
     SorobanRpc: {
       Server: jest.fn().mockImplementation(() => ({
@@ -71,8 +88,7 @@ jest.mock('@stellar/stellar-sdk', () => {
         getHealth: jest.fn().mockResolvedValue({ status: 'healthy' }),
       })),
     },
-  };
-});
+  }));
 
 // ── Test App Setup ────────────────────────────────────────────────────────────
 
@@ -482,10 +498,9 @@ describe('API v1 Integration Tests', () => {
       expect(res.body.pageSize).toBe(25);
     });
 
-    it('happy path: enforces maximum pageSize of 100', async () => {
+    it('error: rejects pageSize > 100 with 400', async () => {
       const res = await request(app).get('/api/v1/loans?pageSize=200');
-      expect(res.status).toBe(200);
-      expect(res.body.pageSize).toBe(100);
+      expect(res.status).toBe(400);
     });
 
     it('happy path: returns deprecation headers when no pagination params provided', async () => {

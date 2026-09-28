@@ -92,6 +92,14 @@ const WL_COUNT: Symbol = symbol_short!("WLCOUNT");  // number of whitelisted liq
 const MIN_LOAN: Symbol = symbol_short!("MINLOAN"); // minimum loan amount in stroops
 const MAX_LOAN: Symbol = symbol_short!("MAXLOAN"); // maximum loan amount in stroops
 const MAX_EXTENSIONS: Symbol = symbol_short!("MAXEXT");
+const MIN_COLLATERAL: Symbol = symbol_short!("MIN_COLL");
+const LOAN_COOLDOWN: Symbol = symbol_short!("LN_CD");
+
+// ── TWAP ring-buffer storage keys ─────────────────────────────────────────────
+const TWAP_BUF: Symbol = symbol_short!("TWAP_BUF");
+const TWAP_LEN: Symbol = symbol_short!("TWAP_LEN");
+const TWAP_CAP: Symbol = symbol_short!("TWAP_CAP");
+const TWAP_MIN_OBS: Symbol = symbol_short!("TWAP_MO");
 
 // ── Issue #1046 storage key ───────────────────────────────────────────────────
 const LIQ_BONUS: Symbol = symbol_short!("LIQBONUS"); // liquidation bonus bps e.g. 500 = 5%
@@ -130,6 +138,9 @@ pub const DEFAULT_LOAN_COOLDOWN: u32 = 0;
 
 /// Default TWAP ring-buffer capacity (number of price observations stored).
 pub const DEFAULT_TWAP_CAP: u32 = 60;
+
+/// Default minimum number of observations required for TWAP enforcement (#488).
+pub const DEFAULT_TWAP_MIN_OBS: u32 = 2;
 
 // ── TTL management ───────────────────────────────────────────────────────────
 
@@ -207,6 +218,8 @@ pub enum Error {
     CooldownActive = 28,
     /// Insufficient TWAP data points to compute a reliable average.
     InsufficientTwapData = 31,
+    /// Requested amount exceeds per-collateral max LTV.
+    ExceedsMaxLtv = 32,
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -348,6 +361,16 @@ pub struct TwapEntry {
     pub timestamp: u64,
 }
 
+/// A price observation with timestamp for TWAP enforcement (#488).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceObservation {
+    /// Oracle price in the protocol token's base unit.
+    pub price: i128,
+    /// Ledger timestamp of this observation.
+    pub timestamp: u64,
+}
+
 // ── Storage helpers ──────────────────────────────────────────────────────────
 
 /// Persistent storage keys used by the contract.
@@ -480,6 +503,7 @@ impl StellarKraal {
         env.storage().instance().set(&TWAP_BUF, &0u32); // head index
         env.storage().instance().set(&TWAP_LEN, &0u32); // current length
         env.storage().instance().set(&TWAP_CAP, &DEFAULT_TWAP_CAP);
+        env.storage().instance().set(&TWAP_MIN_OBS, &DEFAULT_TWAP_MIN_OBS);
         Ok(())
     }
 
@@ -981,8 +1005,26 @@ impl StellarKraal {
             }
         }
 
+        // ── TWAP price enforcement (#488) ───────────────────────────
+        // Prevent single-block oracle manipulation from artificially inflating borrow capacity.
+        // If the spot price has spiked above TWAP and sufficient observations exist,
+        // scale down the effective collateral value by twap_price / last_price.
+        let last_price: i128 = env.storage().instance().get(&LAST_PRICE).unwrap_or(0);
+        let twap_price: i128 = env.storage().instance().get(&TWAP_PRICE).unwrap_or(0);
+        let twap_len: u32 = env.storage().instance().get(&TWAP_LEN).unwrap_or(0);
+        let min_obs: u32 = env.storage().instance().get(&TWAP_MIN_OBS).unwrap_or(DEFAULT_TWAP_MIN_OBS);
+
+        let effective_collateral_value = if twap_price > 0 && last_price > twap_price && twap_len >= min_obs {
+            total_collateral_value
+                .checked_mul(twap_price)
+                .ok_or(Error::ArithmeticOverflow)?
+                / last_price
+        } else {
+            total_collateral_value
+        };
+
         let ltv: u32 = env.storage().instance().get(&LTV).unwrap();
-        let max_loan = compute_ltv(total_collateral_value, ltv).ok_or(Error::InvalidAmount)?;
+        let max_loan = compute_ltv(effective_collateral_value, ltv).ok_or(Error::InvalidAmount)?;
 
         if amount > max_loan {
             return Err(Error::InsufficientCollateral);
@@ -1000,7 +1042,7 @@ impl StellarKraal {
             id: loan_id,
             borrower: borrower.clone(),
             collateral_ids: collateral_ids.clone(),
-            total_collateral_value,
+            total_collateral_value: effective_collateral_value,
             principal: amount,
             outstanding: amount,
             interest_accrued: 0,
@@ -1268,7 +1310,21 @@ impl StellarKraal {
         let liq_thr: u32 = env.storage().instance().get(&LIQ_THR).unwrap();
         let close_factor: u32 = env.storage().instance().get(&CLOSE_FACTOR).unwrap();
 
-        let hf = Self::compute_health_factor_with_thr(&loan, liq_thr)?;
+        let last_price: i128 = env.storage().instance().get(&LAST_PRICE).unwrap_or(0);
+        let twap_price: i128 = env.storage().instance().get(&TWAP_PRICE).unwrap_or(0);
+        let twap_len: u32 = env.storage().instance().get(&TWAP_LEN).unwrap_or(0);
+        let min_obs: u32 = env.storage().instance().get(&TWAP_MIN_OBS).unwrap_or(DEFAULT_TWAP_MIN_OBS);
+
+        let mut eval_loan = loan.clone();
+        if twap_price > 0 && last_price > twap_price && twap_len >= min_obs {
+            eval_loan.total_collateral_value = loan
+                .total_collateral_value
+                .checked_mul(twap_price)
+                .ok_or(Error::ArithmeticOverflow)?
+                / last_price;
+        }
+
+        let hf = Self::compute_health_factor_with_thr(&eval_loan, liq_thr)?;
         if hf >= 10_000 {
             return Err(Error::HealthFactorSafe);
         }
@@ -1441,8 +1497,22 @@ impl StellarKraal {
                 return Ok(0);
             }
         }
+        let last_price: i128 = env.storage().instance().get(&LAST_PRICE).unwrap_or(0);
+        let twap_price: i128 = env.storage().instance().get(&TWAP_PRICE).unwrap_or(0);
+        let twap_len: u32 = env.storage().instance().get(&TWAP_LEN).unwrap_or(0);
+        let min_obs: u32 = env.storage().instance().get(&TWAP_MIN_OBS).unwrap_or(DEFAULT_TWAP_MIN_OBS);
+
+        let mut eval_loan = loan.clone();
+        if twap_price > 0 && last_price > twap_price && twap_len >= min_obs {
+            eval_loan.total_collateral_value = loan
+                .total_collateral_value
+                .checked_mul(twap_price)
+                .ok_or(Error::ArithmeticOverflow)?
+                / last_price;
+        }
+
         let liq_thr: u32 = env.storage().instance().get(&LIQ_THR).unwrap();
-        let hf = Self::compute_health_factor_with_thr(&loan, liq_thr)?;
+        let hf = Self::compute_health_factor_with_thr(&eval_loan, liq_thr)?;
 
         // ── Update rolling history (cap = 5) ──────────────────────────
         const HF_HISTORY_CAP: u32 = 5;
@@ -2000,8 +2070,7 @@ impl StellarKraal {
             }
         }
 
-        env.storage().instance().set(&LAST_PRICE, &median);
-        env.storage().instance().set(&LAST_PRICE_TIME, &env.ledger().timestamp());
+        Self::record_price_observation(&env, median);
 
         Ok(OracleReport {
             median,
@@ -2010,26 +2079,8 @@ impl StellarKraal {
         })
     }
 
-    // ── submit_price ──────────────────────────────────────────────────────
-    /// Submit a single price observation to update the TWAP.
-    ///
-    /// The caller must be either the legacy single-oracle address (`ORACLE`)
-    /// *or* any address in the trusted oracle list (`ORACLES`), satisfying
-    /// ADR-006's requirement for a multi-oracle setup (#1043).
-    pub fn submit_price(env: Env, oracle: Address, price: i128) -> Result<(), Error> {
-        Self::assert_initialized(&env)?;
-        oracle.require_auth();
-        // Accept the legacy single oracle *or* any trusted oracle in the list.
-        let stored_oracle: Address = env.storage().instance().get(&ORACLE).unwrap();
-        let oracles = Self::get_oracles(env.clone());
-        let is_trusted = oracle == stored_oracle || oracles.contains(&oracle);
-        if !is_trusted {
-            return Err(Error::Unauthorized);
-        }
-        if price <= 0 {
-            return Err(Error::InvalidPrice);
-        }
-
+    // ── record_price_observation ──────────────────────────────────────────
+    fn record_price_observation(env: &Env, price: i128) {
         let now = env.ledger().timestamp();
 
         // ── Ring buffer write ─────────────────────────────────────────
@@ -2054,11 +2105,12 @@ impl StellarKraal {
         let window: u64 = env.storage().instance().get(&TWAP_WINDOW).unwrap_or(3600);
         let last_time: u64 = env.storage().instance().get(&LAST_PRICE_TIME).unwrap_or(0);
 
-        let (new_sum, new_count) = if last_time == 0 || now.saturating_sub(last_time) > window {
+        let sum: i128 = env.storage().instance().get(&TWAP_SUM).unwrap_or(0);
+        let count: u32 = env.storage().instance().get(&TWAP_COUNT).unwrap_or(0);
+
+        let (new_sum, new_count) = if count == 0 || (last_time > 0 && now.saturating_sub(last_time) > window) {
             (price, 1u32)
         } else {
-            let sum: i128 = env.storage().instance().get(&TWAP_SUM).unwrap_or(0);
-            let count: u32 = env.storage().instance().get(&TWAP_COUNT).unwrap_or(0);
             let new_count = count.saturating_add(1);
             (sum.checked_add(price).unwrap_or(i128::MAX), new_count)
         };
@@ -2073,6 +2125,29 @@ impl StellarKraal {
             (symbol_short!("TWAP"), symbol_short!("price")),
             (price, twap, now),
         );
+    }
+
+    // ── submit_price ──────────────────────────────────────────────────────
+    /// Submit a single price observation to update the TWAP.
+    ///
+    /// The caller must be either the legacy single-oracle address (`ORACLE`)
+    /// *or* any address in the trusted oracle list (`ORACLES`), satisfying
+    /// ADR-006's requirement for a multi-oracle setup (#1043).
+    pub fn submit_price(env: Env, oracle: Address, price: i128) -> Result<(), Error> {
+        Self::assert_initialized(&env)?;
+        oracle.require_auth();
+        // Accept the legacy single oracle *or* any trusted oracle in the list.
+        let stored_oracle: Address = env.storage().instance().get(&ORACLE).unwrap();
+        let oracles = Self::get_oracles(env.clone());
+        let is_trusted = oracle == stored_oracle || oracles.contains(&oracle);
+        if !is_trusted {
+            return Err(Error::Unauthorized);
+        }
+        if price <= 0 {
+            return Err(Error::InvalidPrice);
+        }
+
+        Self::record_price_observation(&env, price);
         Ok(())
     }
 
@@ -2184,6 +2259,30 @@ impl StellarKraal {
     /// Return the current TWAP ring-buffer capacity.
     pub fn get_twap_cap(env: Env) -> u32 {
         env.storage().instance().get(&TWAP_CAP).unwrap_or(DEFAULT_TWAP_CAP)
+    }
+
+    // ── set_twap_min_observations ─────────────────────────────────────────
+    /// Update the minimum number of observations required for TWAP enforcement (admin-only, #488).
+    pub fn set_twap_min_observations(env: Env, admin: Address, min_obs: u32) -> Result<(), Error> {
+        Self::assert_initialized(&env)?;
+        Self::assert_admin(&env, &admin)?;
+        admin.require_auth();
+        if min_obs == 0 {
+            return Err(Error::InvalidAmount);
+        }
+        let old_min_obs: u32 = env.storage().instance().get(&TWAP_MIN_OBS).unwrap_or(DEFAULT_TWAP_MIN_OBS);
+        env.storage().instance().set(&TWAP_MIN_OBS, &min_obs);
+        env.events().publish(
+            (symbol_short!("TWAP"), Symbol::new(&env, "minObsUpd")),
+            (old_min_obs, min_obs),
+        );
+        Ok(())
+    }
+
+    // ── get_twap_min_observations ─────────────────────────────────────────
+    /// Return the minimum number of observations required for TWAP enforcement (#488).
+    pub fn get_twap_min_observations(env: Env) -> u32 {
+        env.storage().instance().get(&TWAP_MIN_OBS).unwrap_or(DEFAULT_TWAP_MIN_OBS)
     }
 
     // ── get_twap_data ─────────────────────────────────────────────────────
@@ -2392,7 +2491,19 @@ impl StellarKraal {
             }
             total
         };
-        loan.total_collateral_value = new_collateral_value;
+        let twap_price: i128 = env.storage().instance().get(&TWAP_PRICE).unwrap_or(0);
+        let twap_len: u32 = env.storage().instance().get(&TWAP_LEN).unwrap_or(0);
+        let min_obs: u32 = env.storage().instance().get(&TWAP_MIN_OBS).unwrap_or(DEFAULT_TWAP_MIN_OBS);
+
+        let effective_collateral_value = if twap_price > 0 && last_price > twap_price && twap_len >= min_obs {
+            new_collateral_value
+                .checked_mul(twap_price)
+                .ok_or(Error::ArithmeticOverflow)?
+                / last_price
+        } else {
+            new_collateral_value
+        };
+        loan.total_collateral_value = effective_collateral_value;
 
         let liq_thr: u32 = env.storage().instance().get(&LIQ_THR).unwrap();
         let hf = Self::compute_health_factor_with_thr(&loan, liq_thr)?;
@@ -2670,11 +2781,8 @@ impl StellarKraal {
             }
         }
 
-        // 5. Update the stored price to the median.
-        env.storage().instance().set(&LAST_PRICE, &median);
-        env.storage()
-            .instance()
-            .set(&LAST_PRICE_TIME, &env.ledger().timestamp());
+        // 5. Update the stored price and TWAP with the median.
+        Self::record_price_observation(&env, median);
 
         env.events().publish(
             (symbol_short!("oracle"), symbol_short!("median")),

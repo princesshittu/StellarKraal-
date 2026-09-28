@@ -66,6 +66,10 @@ A Stellar wallet browser extension that allows users to sign transactions and in
 ### Health Factor (HF)
 A numeric representation of a loan's safety. Calculated as `(collateral_value * liquidation_threshold) / outstanding_balance`, scaled by 10,000 (basis points). A value below 10,000 means the loan is eligible for [Liquidation](#liquidation). See also [Collateralization Ratio](#collateralization-ratio), [Liquidation Threshold](#liquidation-threshold).
 
+### Horizon
+The Stellar Foundation's public API server that provides a REST interface to the Stellar network. Horizon indexes ledger data and exposes endpoints for querying accounts, transactions, operations, and effects. StellarKraal's backend interacts with the network via **Soroban RPC** rather than Horizon for contract calls, but Horizon can be used to inspect raw ledger data and account state. See also [Soroban RPC](#soroban-rpc), [Testnet](#testnet).
+Official docs: https://developers.stellar.org/docs/data/horizon
+
 ## I
 
 ### Interest Rate
@@ -85,7 +89,8 @@ An [interest rate](#interest-rate) model where the rate increases slowly up to a
 ## L
 
 ### Ledger
-A sequential block in the Stellar network that contains transactions. The [contract event listener](guides/contract-event-listener.md) tracks the last processed ledger to avoid re-processing events. See also [Soroban](#soroban).
+A sequential block in the Stellar network that contains transactions. The [contract event listener](guides/contract-event-listener.md) tracks the last processed ledger to avoid re-processing events. Each ledger closes approximately every 5 seconds and has a unique sequence number. See also [Soroban](#soroban), [Sequence Number](#sequence-number).
+Official docs: https://developers.stellar.org/docs/learn/fundamentals/stellar-data-structures/ledgers
 
 ### Ledger Cursor
 A pointer to the last processed ledger sequence number. The event listener persists this cursor to enable replay from the correct position after a restart. See also [Ledger](#ledger).
@@ -106,6 +111,10 @@ The current state of a loan in the [Loan State Machine](protocol/loan-state-mach
 The maximum percentage of collateral value that can be borrowed. For example, a 70% LTV means a borrower can receive up to 70% of the collateral's appraised value as a loan. See also [Collateral](#collateral), [Liquidation Threshold](#liquidation-threshold).
 
 ## M
+
+### Mainnet
+The live, public Stellar network where real-value transactions occur. StellarKraal's production deployment targets Mainnet. Contrast with [Testnet](#testnet), which uses valueless test lumens and resets periodically. Always verify `NEXT_PUBLIC_NETWORK=mainnet` in production environment variables before deploying contracts.
+Official docs: https://developers.stellar.org/docs/learn/fundamentals/networks
 
 ### Multi-Oracle Median
 A price feed mechanism that aggregates prices from multiple oracle sources and takes the median value. This reduces the impact of any single oracle failure or manipulation. See also [TWAP](#twap-time-weighted-average-price).
@@ -147,10 +156,23 @@ The Soroban JSON-RPC endpoint used by the backend to query contract state, submi
 ### SAC (Stellar Asset Contract)
 A Soroban smart contract that wraps a classic Stellar asset so it can be used within the Soroban contract environment. StellarKraal uses a SAC to represent the loan disbursement token on-chain. See also [Soroban](#soroban).
 
+### Sequence Number
+A monotonically increasing counter on every Stellar account, incremented by one each time the account submits a transaction. The Soroban RPC requires the correct sequence number when building transactions; a mismatch results in a `bad_seq` error. The troubleshooting guide covers how to resolve sequence number mismatches caused by concurrent transaction submission. See also [Ledger](#ledger), [Soroban RPC](#soroban-rpc).
+Official docs: https://developers.stellar.org/docs/learn/fundamentals/stellar-data-structures/accounts#sequence-number
+
 ### Soroban
-Stellar's smart contract platform that runs WebAssembly (WASM) contracts. StellarKraal's loan lifecycle is managed by a Soroban contract written in Rust. See also [Contract ID](#contract-id).
+Stellar's smart contract platform that runs WebAssembly (WASM) contracts. StellarKraal's loan lifecycle is managed by a Soroban contract written in Rust. See also [Contract ID](#contract-id), [WASM](#wasm-webassembly), [Soroban RPC](#soroban-rpc).
+Official docs: https://developers.stellar.org/docs/build/smart-contracts/overview
+
+### Soroban RPC
+The JSON-RPC 2.0 server that provides access to the Soroban contract execution environment. The StellarKraal backend sends all contract invocations and event queries through the Soroban RPC endpoint (configured via `RPC_URL`). It differs from [Horizon](#horizon) in that it exposes contract-specific operations such as `simulateTransaction`, `sendTransaction`, and `getEvents`. See also [RPC](#rpc-remote-procedure-call), [Horizon](#horizon).
+Official docs: https://developers.stellar.org/docs/data/rpc
 
 ## T
+
+### Testnet
+Stellar's public test network, used for development and staging. Test lumens (XLM) have no real value and can be obtained for free from the Stellar Friendbot faucet. The Testnet resets periodically (roughly once per quarter), which removes all deployed contracts and accounts. StellarKraal's local development and CI pipelines target Testnet via `NEXT_PUBLIC_NETWORK=testnet`. Contrast with [Mainnet](#mainnet).
+Official docs: https://developers.stellar.org/docs/learn/fundamentals/networks
 
 ### TWAP (Time-Weighted Average Price)
 A price feed mechanism that averages oracle prices over a time window, reducing the impact of short-term price volatility. Used for [Liquidation](#liquidation) price calculations. See also [Oracle](#oracle), [Multi-Oracle Median](#multi-oracle-median).
@@ -168,6 +190,10 @@ The ratio of total outstanding loans to total available liquidity. In the jump-r
 
 ## W
 
+### WASM (WebAssembly)
+A portable binary instruction format that Soroban uses to execute smart contracts. When you build the StellarKraal Rust contract (`cargo build --target wasm32-unknown-unknown --release`), the output is a `.wasm` file that is uploaded to the Stellar network. The WASM module is stored on-chain and executed by the Soroban VM for every contract invocation. See also [Soroban](#soroban), [Contract ID](#contract-id).
+Official docs: https://webassembly.org/
+
 ### WAL (Write-Ahead Log)
 A SQLite journal mode that improves read/write concurrency. With WAL enabled, readers do not block writers and writers do not block readers. StellarKraal enables WAL mode automatically during database migrations. Verify with `PRAGMA journal_mode;` — the expected result is `wal`. See also [Performance Tuning Guide](performance-tuning.md).
 
@@ -181,6 +207,7 @@ An access control mechanism that restricts which addresses can perform [Liquidat
 
 ### XDR (External Data Representation)
 The binary encoding format used by the Stellar network to serialize transactions and ledger entries. When the backend builds a loan transaction, it encodes it as XDR before sending it to the Soroban RPC endpoint. XDR serialization is one of the common CPU bottlenecks identified during profiling. See also [Soroban](#soroban), [RPC](#rpc-remote-procedure-call).
+Official docs: https://developers.stellar.org/docs/learn/encyclopedia/data-format/xdr
 
 ## Z
 

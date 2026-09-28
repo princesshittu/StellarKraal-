@@ -1,0 +1,91 @@
+{
+  "nav": {
+    "dashboard": "Dashibodi",
+    "loans": "Mikopo",
+    "collateral": "Dhamana",
+    "transactions": "Miamala",
+    "settings": "Mipangilio",
+    "profile": "Wasifu",
+    "faq": "Maswali"
+  },
+  "loans": {
+    "title": "Mikopo",
+    "searchPlaceholder": "Tafuta kwa nambari ya mkopo, mkopaji, au hali…",
+    "noResults": "Hakuna mikopo inayolingana na vichujio vyako.",
+    "loading": "Inapakia…",
+    "status": {
+      "active": "Inafanya kazi",
+      "repaid": "Imelipwa",
+      "liquidated": "Imefutwa",
+      "pending": "Inasubiri"
+    },
+    "requestLoan": "Omba Mkopo",
+    "loanId": "Nambari ya Mkopo",
+    "borrower": "Mkopaji",
+    "amount": "Kiasi",
+    "createdAt": "Imeundwa",
+    "backToLoans": "← Rudi kwa Mikopo"
+  },
+  "collateral": {
+    "title": "Dhamana",
+    "searchPlaceholder": "Tafuta kwa kitambulisho, mmiliki, au aina ya mnyama…",
+    "noResults": "Hakuna dhamana inayolingana na vichujio vyako.",
+    "loading": "Inapakia…",
+    "registerNew": "Sajili Dhamana Mpya",
+    "appraisedValue": "Thamani Iliyokadiriwa",
+    "appraisalHistory": "Historia ya Ukadiriaji",
+    "noAppraisalHistory": "Hakuna historia ya ukadiriaji bado.",
+    "currentAppraisedValue": "Thamani ya Sasa Iliyokadiriwa",
+    "animalType": "Aina ya Mnyama",
+    "breed": "Aina",
+    "age": "Umri",
+    "weight": "Uzito",
+    "count": "Idadi",
+    "owner": "Mmiliki",
+    "backToCollateral": "← Rudi kwenye Orodha ya Dhamana",
+    "backToDashboard": "← Rudi kwenye Dashibodi",
+    "notFound": "Dhamana Haikupatikana",
+    "notFoundDescription": "Hakuna kumbukumbu ya dhamana kwa kitambulisho",
+    "errorMessage": "Haikuweza kupakia dhamana – angalia muunganiko wako",
+    "types": {
+      "cattle": "Ng'ombe",
+      "goat": "Mbuzi",
+      "sheep": "Kondoo",
+      "pig": "Nguruwe",
+      "poultry": "Kuku"
+    },
+    "priceHistory": "Historia ya Bei",
+    "locationUnknown": "Mahali haijarekodiwa",
+    "id": "Kitambulisho"
+  },
+  "wallet": {
+    "connect": "Unganisha Pochi",
+    "connecting": "Inaunganisha…",
+    "disconnect": "Tenganisha",
+    "install": "Sakinisha Freighter",
+    "copyAddress": "Nakili anwani ya pochi",
+    "copied": "Imenakiliwa!",
+    "viewOnExplorer": "Angalia kwenye Stellar Expert",
+    "xlmBalance": "Salio la XLM",
+    "address": "Anwani",
+    "network": "Mtandao"
+  },
+  "common": {
+    "loading": "Inapakia…",
+    "error": "Kuna hitilafu fulani",
+    "retry": "Jaribu tena",
+    "save": "Hifadhi",
+    "cancel": "Ghairi",
+    "confirm": "Thibitisha",
+    "close": "Funga",
+    "back": "Rudi",
+    "next": "Inayofuata",
+    "submit": "Wasilisha",
+    "search": "Tafuta",
+    "filter": "Chuja",
+    "clear": "Futa",
+    "noData": "Hakuna data inayopatikana",
+    "year": "mwaka",
+    "kg": "kg"
+  }
+}

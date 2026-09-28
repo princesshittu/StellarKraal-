@@ -1,7 +1,7 @@
 # ADR-009: API v2 Design Direction
 
 **Date:** 2026-07-27  
-**Status:** Proposed
+**Status:** Superseded by [ADR-011](ADR-011-graphql-api-v2.md)
 
 ## Context
 

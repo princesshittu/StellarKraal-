@@ -206,6 +206,101 @@ Each transition emits a Soroban contract event. See [events.md](events.md) for f
 
 ---
 
+---
+
+## Event & Webhook Interaction Sequence
+
+The diagram below shows how backend services, the Soroban smart contract, and registered webhook
+consumers interact across the full loan lifecycle — from collateral registration through to final
+repayment and webhook delivery. See [ADR-010](../adr/ADR-010-event-driven-architecture.md) for
+the architectural decision behind the event-driven webhook system.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Borrower
+    participant Frontend
+    participant Backend
+    participant DB as Backend DB
+    participant Contract as Soroban Contract
+    participant Webhooks as Webhook Consumers
+
+    rect rgb(240, 248, 255)
+        Note over Borrower,Webhooks: Phase 1 — Collateral Registration
+        Borrower->>Frontend: Enter collateral details
+        Frontend->>Backend: POST /api/v1/collateral/register
+        Backend->>DB: INSERT collateral record (unlocked)
+        Backend->>Contract: register_collateral(owner, animal_type, count, appraised_value)
+        Contract-->>Backend: contract_id, XDR transaction
+        Backend-->>Frontend: { xdr, collateral_id }
+        Frontend->>Borrower: Prompt to sign XDR (Freighter)
+        Borrower->>Contract: Submit signed XDR to Stellar network
+        Contract-->>Backend: collateral.registered event (via event listener)
+        Backend->>DB: UPDATE collateral — mark on-chain confirmed
+        Backend->>Webhooks: POST fireWebhooks("collateral.registered", payload)
+        Webhooks-->>Backend: 200 OK (HMAC-SHA256 verified)
+    end
+
+    rect rgb(240, 255, 240)
+        Note over Borrower,Webhooks: Phase 2 — Loan Request → Active
+        Borrower->>Frontend: Request loan (amount, collateral_id)
+        Frontend->>Backend: POST /api/v1/loan/request
+        Backend->>DB: INSERT loan (status: pending)
+        Backend->>Contract: request_loan(borrower, collateral_id, amount)
+        Contract-->>Backend: loan_id, XDR transaction
+        Backend-->>Frontend: { xdr, loan_id }
+        Frontend->>Borrower: Prompt to sign XDR (Freighter)
+        Borrower->>Contract: Submit signed XDR to Stellar network
+        Contract-->>Backend: loan.requested event → topics: ("loan","requested")
+        Backend->>DB: UPDATE loan status: pending → active
+        Backend->>Webhooks: POST fireWebhooks("loan.approved", payload)
+        Webhooks-->>Backend: 200 OK
+    end
+
+    rect rgb(255, 255, 224)
+        Note over Borrower,Webhooks: Phase 3 — Loan Repayment → Repaid
+        Borrower->>Frontend: Initiate repayment
+        Frontend->>Backend: POST /api/v1/loan/repay
+        Backend->>Contract: repay_loan(loan_id, repay_amount)
+        Contract-->>Backend: XDR transaction
+        Backend-->>Frontend: { xdr }
+        Frontend->>Borrower: Prompt to sign XDR (Freighter)
+        Borrower->>Contract: Submit signed XDR to Stellar network
+        Contract->>Contract: Emit event topics: ("loan","repaid")\noutstanding=0, status=Repaid
+        Contract-->>Backend: loan.repaid contract event (via event listener polling)
+        Backend->>DB: UPDATE loan status: active → repaid\nRelease collateral lock
+        Backend->>Webhooks: POST fireWebhooks("loan.repaid", payload)
+        Webhooks-->>Backend: 200 OK
+    end
+
+    rect rgb(255, 240, 240)
+        Note over Borrower,Webhooks: Phase 4 — Webhook Delivery Details
+        Note over Backend,Webhooks: Each delivery includes:<br/>X-StellarKraal-Signature: sha256=HMAC(secret, body)<br/>Optional: AES-256-GCM encrypted payload<br/>Retry: up to 5× with exponential backoff (1s→16s)
+        Backend->>Webhooks: POST /your-endpoint (event payload)
+        alt 2xx response
+            Webhooks-->>Backend: Delivery confirmed — logged as success
+        else Non-2xx / timeout
+            Backend->>Webhooks: Retry attempt 1 (after 1s)
+            Backend->>Webhooks: Retry attempt 2 (after 2s)
+            Backend->>Webhooks: Retry attempt N (up to 5 total)
+        end
+    end
+```
+
+### Sequence Notes
+
+- **Event listener polling**: The backend polls Soroban contract events at a configurable interval
+  (see [Event Listener Lifecycle](../guides/event-listener-lifecycle.md)). Contract events are
+  not delivered synchronously — there is a propagation delay between on-chain confirmation and
+  backend processing.
+- **Webhook signatures**: Every delivery is signed with `HMAC-SHA256` using the per-registration
+  secret. Consumers must verify the `X-StellarKraal-Signature` header. See [ADR-010](../adr/ADR-010-event-driven-architecture.md).
+- **At-most-once delivery**: The webhook system retries up to 5 times. If the backend restarts
+  during a retry window, that delivery may be lost. Consumers should reconcile against the REST
+  API for critical workflows.
+
+---
+
 ## Related
 
 - Smart contract: [`contracts/stellarkraal/src/lib.rs`](../../contracts/stellarkraal/src/lib.rs)
@@ -213,3 +308,4 @@ Each transition emits a Soroban contract event. See [events.md](events.md) for f
 - State machine tests: [`backend/src/loanStateMachine.test.ts`](../../backend/src/loanStateMachine.test.ts)
 - Liquidation mechanics: [liquidation.md](liquidation.md)
 - Contract events reference: [events.md](events.md)
+- Event-driven architecture: [ADR-010](../adr/ADR-010-event-driven-architecture.md)

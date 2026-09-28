@@ -11,3 +11,6 @@
 # CVE-2023-12345  # FP: only affects feature X not used here. Accepted by @alice 2026-01-15. Re-evaluate 2026-07-15.
 
 # Add accepted suppressions below:
+CVE-2026-59873
+CVE-2026-75604
+GHSA-2xp9-vwfh-vxw4

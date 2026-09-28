@@ -19,8 +19,9 @@ restore from a backup, and the RTO/RPO targets that the procedure is designed to
 4. [Prerequisites](#prerequisites)
 5. [Manual Backup Trigger](#manual-backup-trigger)
 6. [Restore Procedure](#restore-procedure)
-7. [Verification Checklist](#verification-checklist)
-8. [Runbook Reference](#runbook-reference)
+7. [RDS PostgreSQL Backup and Restore](#rds-postgresql-backup-and-restore)
+8. [Verification Checklist](#verification-checklist)
+9. [Runbook Reference](#runbook-reference)
 
 ---
 
@@ -315,9 +316,278 @@ with:
 
 ---
 
+---
+
+## RDS PostgreSQL Backup and Restore
+
+StellarKraal's production and staging databases run on **AWS RDS PostgreSQL**. In addition
+to the application-level `pg_dump` backups described above, RDS provides its own
+automated backup and snapshot mechanisms that operate at the storage level.  Both
+layers are active in production; use whichever best matches the recovery scenario.
+
+> **Terraform resource references:** The RDS instance and its backup settings are
+> managed in `infrastructure/modules/rds/main.tf`. All AWS CLI examples below assume
+> the `stellarkraal-production` AWS profile; substitute `stellarkraal-staging` as needed.
+
+---
+
+### RDS RTO and RPO Targets
+
+| Target | Value | Notes |
+|--------|-------|-------|
+| **RPO** (Recovery Point Objective) | ≤ 5 minutes | Continuous automatic backups with transaction log archival allow PITR to any 5-minute window within the retention period |
+| **RTO** (Recovery Time Objective) | ≤ 1 hour | Restoring to a new RDS instance from a snapshot or PITR typically completes in 20–40 minutes; ECS service restart and smoke tests add ≤ 20 minutes |
+
+These targets apply to the RDS-level restore path. The application-level `pg_dump`
+path carries the broader 24-hour RPO / 4-hour RTO stated earlier.
+
+---
+
+### Automated RDS Backup Schedule
+
+RDS automated backups are enabled with a **7-day retention window**. AWS automatically
+takes a daily snapshot during the configured maintenance window and continuously
+archives transaction logs (WAL) to enable PITR.
+
+| Setting | Value | Terraform variable |
+|---------|-------|--------------------|
+| Automated backups | Enabled | `backup_retention_period = 7` |
+| Backup window | 01:00–02:00 UTC | `backup_window = "01:00-02:00"` |
+| Maintenance window | Sunday 05:00–06:00 UTC | `maintenance_window = "sun:05:00-sun:06:00"` |
+| Multi-AZ | Yes (production) | `multi_az = true` |
+| Deletion protection | Yes (production) | `deletion_protection = true` |
+
+Automated backups are stored in the same AWS region as the instance. They are **not**
+transferred to S3 and are distinct from the `pg_dump` objects described earlier.
+
+Verify the current backup configuration:
+
+```bash
+aws rds describe-db-instances \
+  --db-instance-identifier stellarkraal-production \
+  --query 'DBInstances[0].{BackupRetentionPeriod:BackupRetentionPeriod,BackupWindow:PreferredBackupWindow,MultiAZ:MultiAZ}' \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+---
+
+### Manual RDS Snapshot Creation
+
+Take a manual snapshot before any schema migration, major release, or planned
+maintenance. Manual snapshots are not subject to the 7-day automated retention limit
+and persist until explicitly deleted.
+
+```bash
+# Create a manual snapshot
+aws rds create-db-snapshot \
+  --db-instance-identifier stellarkraal-production \
+  --db-snapshot-identifier "stellarkraal-production-pre-migration-$(date +%Y%m%d-%H%M%S)" \
+  --tags Key=reason,Value=pre-migration Key=triggered-by,Value=<your-name> \
+  --profile stellarkraal-production \
+  --region us-east-1
+
+# Wait for the snapshot to become available (typically 5–15 minutes)
+aws rds wait db-snapshot-available \
+  --db-instance-identifier stellarkraal-production \
+  --db-snapshot-identifier "stellarkraal-production-pre-migration-<TIMESTAMP>" \
+  --profile stellarkraal-production \
+  --region us-east-1
+
+# Verify the snapshot is available
+aws rds describe-db-snapshots \
+  --db-instance-identifier stellarkraal-production \
+  --query 'DBSnapshots[*].{ID:DBSnapshotIdentifier,Status:Status,CreatedAt:SnapshotCreateTime}' \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+List all available snapshots (automated + manual):
+
+```bash
+aws rds describe-db-snapshots \
+  --db-instance-identifier stellarkraal-production \
+  --snapshot-type manual \
+  --query 'DBSnapshots[*].{ID:DBSnapshotIdentifier,Status:Status,AllocatedStorage:AllocatedStorage,CreatedAt:SnapshotCreateTime}' \
+  --output table \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+---
+
+### Point-in-Time Restore (PITR)
+
+RDS PITR lets you restore the database to any point within the automated backup
+retention window (up to 7 days). This is the fastest path to recovering from
+accidental data deletion or corruption with minimal data loss.
+
+> PITR **always** creates a **new** DB instance. It does not modify the source.
+> The restored instance must be validated before cutting over application traffic.
+
+**Step 1 — Identify the restore point**
+
+Choose a timestamp just before the incident:
+
+```bash
+# View the earliest available restore time
+aws rds describe-db-instances \
+  --db-instance-identifier stellarkraal-production \
+  --query 'DBInstances[0].{EarliestRestoreTime:EarliestRestorableTime,LatestRestoreTime:LatestRestorableTime}' \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+**Step 2 — Initiate the PITR restore**
+
+```bash
+aws rds restore-db-instance-to-point-in-time \
+  --source-db-instance-identifier stellarkraal-production \
+  --target-db-instance-identifier stellarkraal-production-pitr-$(date +%Y%m%d-%H%M%S) \
+  --restore-time "2026-09-25T14:30:00Z" \
+  --db-instance-class db.t3.medium \
+  --no-multi-az \
+  --publicly-accessible \
+  --vpc-security-group-ids <sg-id> \
+  --db-subnet-group-name stellarkraal-production-subnet-group \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+Replace `--restore-time` with the target ISO 8601 UTC timestamp. Retrieve the subnet
+group name and security group ID from Terraform:
+
+```bash
+terraform -chdir=infrastructure output rds_subnet_group_name
+terraform -chdir=infrastructure output rds_security_group_id
+```
+
+**Step 3 — Wait for the restored instance to become available**
+
+```bash
+aws rds wait db-instance-available \
+  --db-instance-identifier stellarkraal-production-pitr-<TIMESTAMP> \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+This typically takes 10–30 minutes depending on database size.
+
+**Step 4 — Retrieve the restored instance endpoint**
+
+```bash
+aws rds describe-db-instances \
+  --db-instance-identifier stellarkraal-production-pitr-<TIMESTAMP> \
+  --query 'DBInstances[0].Endpoint.{Address:Address,Port:Port}' \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+**Step 5 — Validate the restored database**
+
+Connect and run sanity checks before cutting over traffic:
+
+```bash
+# Set a temporary DATABASE_URL for the restored instance
+export RESTORED_DB_URL="postgres://<user>:<password>@<restored-endpoint>:5432/stellarkraal"
+
+psql "$RESTORED_DB_URL" -c "SELECT COUNT(*) FROM loans;"
+psql "$RESTORED_DB_URL" -c "SELECT COUNT(*) FROM collateral;"
+psql "$RESTORED_DB_URL" -c "SELECT MAX(created_at) FROM loans;"
+```
+
+Compare results against the current production values.
+
+**Step 6 — Cut over application traffic**
+
+Update the ECS task definition `DATABASE_URL` secret in AWS Secrets Manager (or SSM
+Parameter Store) to point to the restored instance, then trigger a new ECS deployment:
+
+```bash
+# Update the secret
+aws secretsmanager put-secret-value \
+  --secret-id stellarkraal/production/DATABASE_URL \
+  --secret-string "postgres://<user>:<password>@<restored-endpoint>:5432/stellarkraal" \
+  --profile stellarkraal-production \
+  --region us-east-1
+
+# Force a new ECS deployment to pick up the new secret value
+aws ecs update-service \
+  --cluster stellarkraal-production \
+  --service stellarkraal-backend \
+  --force-new-deployment \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+**Step 7 — Clean up**
+
+Once the original (damaged) instance is no longer needed, delete it to avoid unnecessary
+costs. Optionally create a final snapshot first:
+
+```bash
+aws rds delete-db-instance \
+  --db-instance-identifier stellarkraal-production \
+  --final-db-snapshot-identifier stellarkraal-production-final-$(date +%Y%m%d) \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+---
+
+### Restore from a Manual Snapshot
+
+To restore a specific manual snapshot (rather than a PITR timestamp):
+
+```bash
+aws rds restore-db-instance-from-db-snapshot \
+  --db-instance-identifier stellarkraal-production-restored-$(date +%Y%m%d) \
+  --db-snapshot-identifier "stellarkraal-production-pre-migration-<TIMESTAMP>" \
+  --db-instance-class db.t3.medium \
+  --vpc-security-group-ids <sg-id> \
+  --db-subnet-group-name stellarkraal-production-subnet-group \
+  --no-multi-az \
+  --profile stellarkraal-production \
+  --region us-east-1
+```
+
+Then follow Steps 3–7 of the PITR procedure above.
+
+---
+
+### Terraform Resource References
+
+All RDS backup settings are managed in Terraform. Key files:
+
+| Resource | File | Key variables |
+|----------|------|---------------|
+| RDS instance | `infrastructure/modules/rds/main.tf` | `backup_retention_period`, `backup_window`, `maintenance_window`, `multi_az`, `deletion_protection` |
+| RDS subnet group | `infrastructure/modules/rds/main.tf` | `db_subnet_group_name` |
+| Security groups | `infrastructure/modules/vpc/main.tf` | `rds_security_group_id` |
+| Environment-specific overrides | `infrastructure/envs/production.tfvars` | All production values |
+
+To modify the backup retention window and apply the change:
+
+```bash
+# Edit infrastructure/envs/production.tfvars:
+# backup_retention_period = 14   # increase to 14 days
+
+terraform workspace select production
+terraform plan -var-file="envs/production.tfvars" -target=module.rds
+terraform apply -var-file="envs/production.tfvars" -target=module.rds
+```
+
+> **Changing `backup_retention_period` from 0 (disabled) to any positive value will
+> cause a brief (< 1 minute) storage configuration change on the instance but will
+> not restart or interrupt it.**
+
+---
+
 ## Verification Checklist
 
 Run this checklist every quarter as part of the on-call rotation:
+
+**S3 / pg_dump backups:**
 
 - [ ] Confirm nightly backup jobs ran successfully for the last 30 days (check CloudWatch
   Logs for the `stellarkraal-backup` ECS task).
@@ -330,6 +600,15 @@ Run this checklist every quarter as part of the on-call rotation:
 - [ ] Confirm the lifecycle rules are in place: `aws s3api get-bucket-lifecycle-configuration --bucket stellarkraal-backups-production`.
 - [ ] Confirm bucket versioning is enabled: `aws s3api get-bucket-versioning --bucket stellarkraal-backups-production`.
 - [ ] Delete the temporary staging database after verification.
+
+**RDS PostgreSQL backups:**
+
+- [ ] Verify automated backups are enabled and `BackupRetentionPeriod` ≥ 7:
+  `aws rds describe-db-instances --db-instance-identifier stellarkraal-production --query 'DBInstances[0].BackupRetentionPeriod'`.
+- [ ] Take a manual snapshot and confirm it reaches `available` status within 15 minutes.
+- [ ] Perform a test PITR restore to a temporary instance in **staging** and verify row counts.
+- [ ] Confirm the restored staging instance is deleted after validation.
+- [ ] Confirm `deletion_protection = true` is still set on the production RDS instance.
 - [ ] Record the result in the on-call rotation log.
 
 | Last validated by | Date | Result |

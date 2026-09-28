@@ -2,6 +2,101 @@
 
 This document describes the full authentication flow implemented in `backend/src/middleware/auth.ts`. See [ADR-002](./adr/ADR-002-jwt-auth.md) for the architectural decision record.
 
+## Authentication Flow Diagram
+
+The sequence diagram below shows the complete wallet-based authentication lifecycle — from
+connecting Freighter through challenge-response, JWT issuance, silent refresh, and logout.
+See [ADR-002](./adr/ADR-002-jwt-auth.md) for the architectural decision record.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Freighter as Freighter Wallet
+    participant Frontend
+    participant Backend
+    participant Store as Token Store (in-memory)
+
+    rect rgb(240, 248, 255)
+        Note over User,Store: Phase 1 — Wallet Connect & Challenge Request
+        User->>Frontend: Click "Connect Wallet"
+        Frontend->>Freighter: freighter.getPublicKey()
+        Freighter-->>Frontend: publicKey (G…)
+        Frontend->>Backend: GET /api/auth/challenge
+        Backend->>Store: randomBytes(32) → nonce\nStore: challenges.set(nonce, now + 5min)
+        Backend-->>Frontend: { challenge: "<64-char hex>" }
+    end
+
+    rect rgb(240, 255, 240)
+        Note over User,Store: Phase 2 — Challenge Sign & JWT Issue
+        Frontend->>Freighter: signChallenge(nonce)
+        Note over Freighter: ed25519 sign with wallet private key\n(never leaves Freighter)
+        Freighter-->>Frontend: { signature }
+        Frontend->>Backend: POST /api/auth/login\n{ walletAddress, signedChallenge: { nonce, signature } }
+        Backend->>Store: Look up nonce — reject if missing/expired
+        Backend->>Store: challenges.delete(nonce)  ← single-use
+        Backend->>Backend: Keypair.fromPublicKey(walletAddress)\n  .verify(nonce, signature)
+        alt Signature valid
+            Backend->>Store: issueTokens(walletAddress)\n  signJwt → accessToken (15 min, HS256)\n  randomBytes → rawRefresh\n  store SHA-256(rawRefresh) → { publicKey, exp }
+            Backend-->>Frontend: { accessToken, expiresIn: 900 }\nSet-Cookie: refreshToken=<raw>\n(HttpOnly; Secure; SameSite=Strict;\nPath=/api/v1/auth/refresh)
+            Frontend->>Frontend: Store accessToken in memory
+        else Signature invalid
+            Backend-->>Frontend: 401 { error: "Invalid signature" }
+        end
+    end
+
+    rect rgb(255, 255, 224)
+        Note over User,Store: Phase 3 — Authenticated API Calls
+        Frontend->>Backend: Any protected request\nAuthorization: Bearer <accessToken>
+        Backend->>Backend: jwtMiddleware:\n  verifyJwt(token) → { sub: publicKey }
+        alt Token valid
+            Backend-->>Frontend: 200 Protected response
+        else Token expired
+            Backend-->>Frontend: 401 { error: "Token expired" }
+            Note over Frontend: Trigger silent refresh (Phase 4)
+        end
+    end
+
+    rect rgb(255, 245, 220)
+        Note over User,Store: Phase 4 — Silent Token Refresh
+        Frontend->>Backend: POST /api/v1/auth/refresh\nCookie: refreshToken=<raw>
+        Backend->>Store: SHA-256(raw) → look up in refreshTokens map
+        alt Token found & not expired
+            Backend->>Store: refreshTokens.delete(oldHash)  ← rotate
+            Backend->>Store: issueTokens(publicKey)\n  new accessToken + new rawRefresh stored
+            Backend-->>Frontend: { accessToken, expiresIn: 900 }\nSet-Cookie: refreshToken=<newRaw>
+        else Token missing / expired / already rotated
+            Backend-->>Frontend: 401 { error: "INVALID_TOKEN" }
+            Note over Frontend: Force re-authentication (Phase 1)
+        end
+    end
+
+    rect rgb(255, 240, 240)
+        Note over User,Store: Phase 5 — Logout
+        User->>Frontend: Click "Disconnect"
+        Frontend->>Backend: POST /api/auth/logout\nCookie: refreshToken=<raw>
+        Backend->>Store: SHA-256(raw) → refreshTokens.delete(hash)
+        Backend-->>Frontend: 200 { message: "Logged out" }\nSet-Cookie: refreshToken=; Max-Age=0
+        Frontend->>Frontend: Clear accessToken from memory
+        Frontend->>Freighter: freighter.disconnect()
+        Freighter-->>Frontend: Wallet disconnected
+    end
+```
+
+### Diagram Notes
+
+- **Single-use challenges**: Each nonce is consumed on first use (`challenges.delete`) and expires
+  after 5 minutes to prevent replay attacks.
+- **Refresh token rotation**: Every successful `/refresh` call issues a new token pair and
+  invalidates the old refresh token. Reuse of a rotated token returns 401, which may indicate
+  token theft.
+- **HttpOnly cookie**: The raw refresh token is never accessible to JavaScript — only the
+  `accessToken` is held in memory, limiting XSS exposure to a 15-minute window.
+- **M2M / API keys**: Server-to-server calls use `Authorization: Bearer sk_<key>` instead of
+  JWTs. See the [API Key Flow section](#api-key-flow-m2m) below.
+
+---
+
 ## Threat Model
 
 - **Replay attacks** — challenges are single-use and expire after 5 minutes.

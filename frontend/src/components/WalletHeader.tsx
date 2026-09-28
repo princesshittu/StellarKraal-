@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWallet } from '@/hooks/useWallet';
 import { formatXlm } from '@/lib/formatMoney';
+import { useRouter } from 'next/navigation';
 
 const NETWORK = (process.env.NEXT_PUBLIC_NETWORK ?? 'TESTNET').toUpperCase();
 const HORIZON_URL =
@@ -11,12 +12,22 @@ const STELLAR_EXPERT_BASE =
     ? 'https://stellar.expert/explorer/mainnet/account'
     : 'https://stellar.expert/explorer/testnet/account';
 
+const JWT_COOKIE_NAME = 'session';
+
+/** Expires the JWT session cookie, clearing auth state. */
+function clearSessionCookie(): void {
+  if (typeof document === 'undefined') return;
+  document.cookie = `${JWT_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax`;
+  document.cookie = `${JWT_COOKIE_NAME}=; path=/; max-age=0; SameSite=Strict`;
+}
+
 function truncateAddress(address: string): string {
   return `${address.slice(0, 8)}…${address.slice(-6)}`;
 }
 
 export default function WalletHeader() {
   const { address, freighterInstalled, connecting, connect, disconnect } = useWallet();
+  const router = useRouter();
 
   const [open, setOpen] = useState(false);
   const [xlmBalance, setXlmBalance] = useState<string | null>(null);
@@ -106,7 +117,10 @@ export default function WalletHeader() {
 
   function handleDisconnect() {
     setOpen(false);
+    // Issue #1208: clear JWT cookie and redirect to home on disconnect
     disconnect();
+    clearSessionCookie();
+    router.push('/');
   }
 
   return (

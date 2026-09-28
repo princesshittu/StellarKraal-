@@ -1,6 +1,7 @@
 'use client';
 import { createContext, useContext, useState, ReactNode, useEffect, useRef } from 'react';
 import { useFormAutoSave } from '@/hooks/useFormAutoSave';
+import { useWizardPersist } from '@/hooks/useWizardPersist';
 
 export type AnimalType = 'cattle' | 'goat' | 'sheep';
 
@@ -141,17 +142,38 @@ export function LoanWizardProvider({
     expiryMs: SAVE_EXPIRY_MS,
   });
 
-  // Restore once on mount so the wizard reopens at the last completed step.
+  // sessionStorage persistence — survives page reloads within the same tab
+  // so mid-wizard refreshes don't lose entered data (#1201).
+  const sessionPersist = useWizardPersist<WizardState>({ walletAddress });
+
+  // Persist every state change to sessionStorage immediately
+  useEffect(() => {
+    if (hasDraftData(state)) {
+      sessionPersist.persist(state);
+    }
+  }, [state, sessionPersist]);
+
+  // Restore once on mount — prefer sessionStorage (survives refresh) over
+  // localStorage (survives tab close) to pick up the most recent state.
   useEffect(() => {
     if (restoredRef.current) return;
     restoredRef.current = true;
+
+    // Try sessionStorage first (handles refresh mid-wizard)
+    const sessionRestored = sessionPersist.restore();
+    if (sessionRestored) {
+      setState(withPrimaryItem(sessionRestored));
+      return;
+    }
+
+    // Fall back to localStorage (handles returning later in the same day)
     const restored = restoreSavedData();
     if (restored) {
       setState(withPrimaryItem(restored));
     }
     // Intentionally run once — restoreSavedData reads storage synchronously
     // and re-running it on every render would fight the autosave interval.
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function setField<K extends keyof WizardState>(key: K, value: WizardState[K]) {
     setState((s) => ({ ...s, [key]: value }));
@@ -202,6 +224,7 @@ export function LoanWizardProvider({
   function reset() {
     setState(createInitialState());
     clearSavedData();
+    sessionPersist.clear();
   }
 
   return (
@@ -214,7 +237,10 @@ export function LoanWizardProvider({
         prevStep,
         reset,
         canProceed,
-        clearSavedProgress: clearSavedData,
+        clearSavedProgress: () => {
+          clearSavedData();
+          sessionPersist.clear();
+        },
       }}
     >
       {children}

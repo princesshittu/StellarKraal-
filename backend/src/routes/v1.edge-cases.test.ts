@@ -80,6 +80,7 @@ jest.mock("../middleware/timeout", () => ({
 jest.mock("../middleware/rateLimit", () => ({
   globalLimiter: (_req: any, _res: any, next: any) => next(),
   writeLimiter: (_req: any, _res: any, next: any) => next(),
+  readLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 
 import { v1Router } from "./v1";

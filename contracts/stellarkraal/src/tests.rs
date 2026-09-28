@@ -36,6 +36,7 @@ fn init(
 ) {
     let client = StellarKraalClient::new(env, contract_id);
     client.initialize(admin, oracle, token, treasury, &6000u32, &8000u32, &1u32);
+    client.set_loan_limits(admin, &1i128, &DEFAULT_MAX_LOAN);
 }
 
 // ── initialize ────────────────────────────────────────────────────────
@@ -405,7 +406,6 @@ fn test_request_loan_within_ltv() {
     let borrower = Address::generate(&env);
     let col_id =
         client.register_livestock(&borrower, &symbol_short!("cattle"), &2u32, &1_000_000i128);
-    let loan_id = client.request_loan(&borrower, &vec![&env, col_id], &600_000i128, &None);
     let loan_id = client.request_loan(&borrower, &vec![&env, col_id], &600_000i128, &None);
     assert_eq!(loan_id, 1);
 }
@@ -1426,7 +1426,6 @@ fn test_get_state_matches_expected_values() {
     client.add_oracle(&admin, &oracle2);
     let col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &2u32, &1_000_000i128);
     client.request_loan(&borrower, &vec![&env, col_id], &600_000i128, &None);
-    client.request_loan(&borrower, &vec![&env, col_id], &600_000i128, &None);
     client.pause(&admin);
 
     let state = client.get_state(&admin);
@@ -1919,7 +1918,6 @@ fn test_set_ltv_ok() {
     let borrower = Address::generate(&env);
     let col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &2u32, &1_000_000i128);
     let loan_id = client.request_loan(&borrower, &vec![&env, col_id], &500_000i128, &None);
-    let loan_id = client.request_loan(&borrower, &vec![&env, col_id], &500_000i128, &None);
     assert_eq!(loan_id, 1);
 }
 
@@ -2093,7 +2091,6 @@ fn test_get_loan_count_one() {
 
     let col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &2, &1_000_000);
     client.request_loan(&borrower, &vec![&env, col_id], &500_000, &None);
-    client.request_loan(&borrower, &vec![&env, col_id], &500_000, &None);
 
     assert_eq!(client.get_loan_count(&borrower), 1);
 }
@@ -2233,8 +2230,8 @@ fn test_loan_without_deadline_stores_none() {
 #[test]
 fn test_get_loan_limits_default() {
     let (env, cid, admin, oracle, token, treasury) = setup();
-    init(&env, &cid, &admin, &oracle, &token, &treasury);
     let client = StellarKraalClient::new(&env, &cid);
+    client.initialize(&admin, &oracle, &token, &treasury, &6000u32, &8000u32, &1u32);
 
     let (min_loan, max_loan) = client.get_loan_limits();
     // default MIN_LOAN = 10_000_000 stroops (1 XLM)
@@ -2296,6 +2293,7 @@ fn test_request_loan_below_min_fails() {
     let (env, cid, admin, oracle, token, treasury) = setup();
     init(&env, &cid, &admin, &oracle, &token, &treasury);
     let client = StellarKraalClient::new(&env, &cid);
+    client.set_loan_limits(&admin, &10_000_000, &DEFAULT_MAX_LOAN);
     let borrower = Address::generate(&env);
     let col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &2u32, &1_000_000i128);
     let loan_id = client.request_loan(&borrower, &vec![&env, col_id], &600_000i128, &None);
@@ -2311,7 +2309,6 @@ fn test_loan_with_deadline_stores_due_ledger() {
     let borrower = Address::generate(&env);
 
     // register collateral worth 100 000 000 stroops; LTV 60% allows up to 60 000 000
-    let _col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &1, &100_000_000);
     let col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &1, &100_000_000);
 
     // Request 60 000 000 stroops (at LTV)
@@ -2329,6 +2326,7 @@ fn test_request_loan_at_min_succeeds() {
     let (env, cid, admin, oracle, token, treasury) = setup();
     init(&env, &cid, &admin, &oracle, &token, &treasury);
     let client = StellarKraalClient::new(&env, &cid);
+    client.set_loan_limits(&admin, &600_000, &DEFAULT_MAX_LOAN);
     let borrower = Address::generate(&env);
     let col_id = client.register_livestock(&borrower, &symbol_short!("cattle"), &2u32, &1_000_000i128);
     let now = env.ledger().timestamp();
@@ -2567,6 +2565,7 @@ fn init_with_balance(
 ) {
     let client = StellarKraalClient::new(env, contract_id);
     client.initialize(admin, oracle, token, treasury, &6000u32, &8000u32, &1u32);
+    client.set_loan_limits(admin, &1i128, &DEFAULT_MAX_LOAN);
 }
 
 /// Read the `MockTokenWithBalance` balance of an address directly.
@@ -3421,9 +3420,9 @@ fn test_request_loan_within_per_collateral_ltv() {
     assert_eq!(loan_id, 1);
 }
 
-/// Loan that exceeds per-collateral max LTV is rejected with error #27.
+/// Loan that exceeds per-collateral max LTV is rejected with error #32.
 #[test]
-#[should_panic(expected = "#27")]
+#[should_panic(expected = "#32")]
 fn test_request_loan_exceeds_per_collateral_ltv() {
     let (env, cid, admin, oracle, token, treasury) = setup();
     init(&env, &cid, &admin, &oracle, &token, &treasury);
@@ -3718,4 +3717,106 @@ fn test_liquidate_without_bonus_works() {
 
     let loan = client.get_loan(&loan_id);
     assert_eq!(loan.outstanding, 600_000i128);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── #488 TWAP Enforcement & Single-Block Manipulation Prevention ───────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_set_and_get_twap_min_observations() {
+    let (env, cid, admin, oracle, token, treasury) = setup();
+    init(&env, &cid, &admin, &oracle, &token, &treasury);
+    let client = StellarKraalClient::new(&env, &cid);
+
+    // Default min observations is 2.
+    assert_eq!(client.get_twap_min_observations(), 2u32);
+
+    // Update to 5.
+    client.set_twap_min_observations(&admin, &5u32);
+    assert_eq!(client.get_twap_min_observations(), 5u32);
+}
+
+#[test]
+#[should_panic(expected = "#3")]
+fn test_set_twap_min_observations_unauthorized() {
+    let (env, cid, admin, oracle, token, treasury) = setup();
+    init(&env, &cid, &admin, &oracle, &token, &treasury);
+    let client = StellarKraalClient::new(&env, &cid);
+    let attacker = Address::generate(&env);
+    client.set_twap_min_observations(&attacker, &5u32);
+}
+
+#[test]
+#[should_panic(expected = "#8")]
+fn test_set_twap_min_observations_zero_fails() {
+    let (env, cid, admin, oracle, token, treasury) = setup();
+    init(&env, &cid, &admin, &oracle, &token, &treasury);
+    let client = StellarKraalClient::new(&env, &cid);
+    client.set_twap_min_observations(&admin, &0u32);
+}
+
+#[test]
+fn test_submit_oracle_prices_updates_twap_buffer() {
+    let (env, cid, admin, oracle, token, treasury) = setup();
+    init(&env, &cid, &admin, &oracle, &token, &treasury);
+    let client = StellarKraalClient::new(&env, &cid);
+
+    let oracle2 = Address::generate(&env);
+    let oracle3 = Address::generate(&env);
+    client.add_oracle(&admin, &oracle2);
+    client.add_oracle(&admin, &oracle3);
+
+    let submitter = Address::generate(&env);
+    let prices = vec![&env, 100i128, 100i128, 100i128];
+    client.submit_oracle_prices(&submitter, &prices);
+
+    let twap_data = client.get_twap_data();
+    assert_eq!(twap_data.current_price, 100i128);
+    assert_eq!(twap_data.twap_price, 100i128);
+}
+
+#[test]
+fn test_twap_enforcement_prevents_single_block_borrow_inflation() {
+    let (env, cid, admin, oracle, token, treasury) = setup();
+    init(&env, &cid, &admin, &oracle, &token, &treasury);
+    let client = StellarKraalClient::new(&env, &cid);
+
+    let borrower = Address::generate(&env);
+    // Register livestock appraised at 20_000_000.
+    // LTV is 6000 bps (60%).
+    // Normal max borrow at 20_000_000: 20_000_000 * 60% = 12_000_000.
+    let col_id = client.register_livestock(
+        &borrower,
+        &symbol_short!("cattle"),
+        &1u32,
+        &20_000_000i128,
+    );
+
+    // Initial oracle submissions at price 100.
+    client.submit_price(&oracle, &100i128);
+    client.submit_price(&oracle, &100i128);
+
+    let twap = client.get_twap_data();
+    assert_eq!(twap.current_price, 100i128);
+    assert_eq!(twap.twap_price, 100i128);
+
+    // Now an attacker spikes spot price in a single block to 500 (5x spike).
+    client.submit_price(&oracle, &500i128);
+
+    let twap_after = client.get_twap_data();
+    assert_eq!(twap_after.current_price, 500i128);
+    // TWAP is (100 + 100 + 500) / 3 = 233.
+    assert!(twap_after.twap_price < 500i128);
+
+    // With TWAP clamping, effective collateral value is clamped to:
+    // 20_000_000 * twap_price / last_price = 20_000_000 * 233 / 500 = 9_320_000.
+    // At 60% LTV, max allowed loan is 9_320_000 * 60% = 5_592_000.
+    // Attempting to borrow full capacity without clamping (12_000_000) must fail with InsufficientCollateral (#8)!
+    let result = client.try_request_loan(&borrower, &vec![&env, col_id], &12_000_000i128, &None);
+    assert_eq!(result, Err(Ok(Error::InsufficientCollateral)));
+
+    // But borrowing within the TWAP-clamped capacity succeeds:
+    let safe_borrow = client.request_loan(&borrower, &vec![&env, col_id], &5_000_000i128, &None);
+    assert!(safe_borrow > 0);
 }

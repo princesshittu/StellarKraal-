@@ -1,17 +1,33 @@
 import { Request, Response, NextFunction } from "express";
 import logger from "../utils/logger";
 
+import { ErrorCode, getStatusCode } from "../utils/errorCodes";
+
 /**
  * Application-level error class with HTTP status code and error code.
  */
 export class AppError extends Error {
+  public readonly statusCode: number;
+  public readonly code: string;
+  public readonly details?: unknown;
+
   constructor(
-    public readonly statusCode: number,
+    statusCodeOrCode: number | ErrorCode | string,
     message: string,
-    public readonly code: string = "INTERNAL_ERROR"
+    codeOrDetails?: string | unknown
   ) {
     super(message);
     this.name = "AppError";
+
+    if (typeof statusCodeOrCode === "number") {
+      this.statusCode = statusCodeOrCode;
+      this.code = typeof codeOrDetails === "string" ? codeOrDetails : "INTERNAL_ERROR";
+      this.details = typeof codeOrDetails === "object" ? codeOrDetails : undefined;
+    } else {
+      this.code = statusCodeOrCode;
+      this.statusCode = getStatusCode(statusCodeOrCode as ErrorCode);
+      this.details = codeOrDetails;
+    }
   }
 }
 
@@ -44,6 +60,19 @@ export function errorHandler(
     path: req.path,
   });
 
-  console.error("DEBUG ERROR HANDLER:", err);
-  res.status(statusCode).json({ error: err.message, code, correlationId });
+  const responseBody: Record<string, unknown> = {
+    error: err.message,
+    code,
+    correlationId,
+  };
+
+  if (err instanceof AppError && err.details !== undefined) {
+    responseBody.details = err.details;
+  }
+
+  if (process.env.NODE_ENV === "development" && err.stack) {
+    responseBody.stack = err.stack;
+  }
+
+  res.status(statusCode).json(responseBody);
 }

@@ -1,0 +1,91 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "loans": "Loans",
+    "collateral": "Collateral",
+    "transactions": "Transactions",
+    "settings": "Settings",
+    "profile": "Profile",
+    "faq": "FAQ"
+  },
+  "loans": {
+    "title": "Loans",
+    "searchPlaceholder": "Search by loan ID, borrower, or status…",
+    "noResults": "No loans match your filters.",
+    "loading": "Loading…",
+    "status": {
+      "active": "Active",
+      "repaid": "Repaid",
+      "liquidated": "Liquidated",
+      "pending": "Pending"
+    },
+    "requestLoan": "Request a Loan",
+    "loanId": "Loan ID",
+    "borrower": "Borrower",
+    "amount": "Amount",
+    "createdAt": "Created",
+    "backToLoans": "← Back to Loans"
+  },
+  "collateral": {
+    "title": "Collateral",
+    "searchPlaceholder": "Search by ID, owner, or animal type…",
+    "noResults": "No collateral matches your filters.",
+    "loading": "Loading…",
+    "registerNew": "Register New Collateral",
+    "appraisedValue": "Appraised Value",
+    "appraisalHistory": "Appraisal History",
+    "noAppraisalHistory": "No appraisal history yet.",
+    "currentAppraisedValue": "Current Appraised Value",
+    "animalType": "Animal Type",
+    "breed": "Breed",
+    "age": "Age",
+    "weight": "Weight",
+    "count": "Count",
+    "owner": "Owner",
+    "backToCollateral": "← Back to Collateral List",
+    "backToDashboard": "← Back to Dashboard",
+    "notFound": "Collateral Not Found",
+    "notFoundDescription": "No collateral record exists for ID",
+    "errorMessage": "Could not load collateral – check your connection",
+    "types": {
+      "cattle": "Cattle",
+      "goat": "Goat",
+      "sheep": "Sheep",
+      "pig": "Pig",
+      "poultry": "Poultry"
+    },
+    "priceHistory": "Price History",
+    "locationUnknown": "Location not recorded",
+    "id": "ID"
+  },
+  "wallet": {
+    "connect": "Connect Wallet",
+    "connecting": "Connecting…",
+    "disconnect": "Disconnect",
+    "install": "Install Freighter",
+    "copyAddress": "Copy wallet address",
+    "copied": "Copied!",
+    "viewOnExplorer": "View on Stellar Expert",
+    "xlmBalance": "XLM Balance",
+    "address": "Address",
+    "network": "Network"
+  },
+  "common": {
+    "loading": "Loading…",
+    "error": "Something went wrong",
+    "retry": "Retry",
+    "save": "Save",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "close": "Close",
+    "back": "Back",
+    "next": "Next",
+    "submit": "Submit",
+    "search": "Search",
+    "filter": "Filter",
+    "clear": "Clear",
+    "noData": "No data available",
+    "year": "yr",
+    "kg": "kg"
+  }
+}

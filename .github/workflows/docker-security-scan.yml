@@ -24,8 +24,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build backend image
-        run: docker build -t stellarkraal-backend:${{ github.sha }} ./backend
+      # Trivy scans a locally loaded image — multi-platform push is not
+      # needed here. We build amd64 only so --load works (buildx cannot
+      # --load a multi-platform image into the local daemon).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image for scanning (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: stellarkraal-backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
 
       - name: Run Trivy vulnerability scanner (CRITICAL — fail build)
         uses: aquasecurity/trivy-action@v0.36.0
@@ -73,8 +87,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build frontend image
-        run: docker build -t stellarkraal-frontend:${{ github.sha }} ./frontend
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build frontend image for scanning (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: stellarkraal-frontend:${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
       - name: Run Trivy vulnerability scanner (CRITICAL — fail build)
         uses: aquasecurity/trivy-action@v0.36.0

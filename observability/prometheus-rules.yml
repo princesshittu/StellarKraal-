@@ -86,3 +86,12 @@ groups:
           summary: "Database Backup Failed"
           runbook: "https://github.com/teslims2/StellarKraal-/blob/main/docs/runbooks/restore-procedure.md"
           dashboard: "http://localhost:3000/d/stellarkraal-backend?var-alert=backup-failure"
+      - alert: HighContractInvocationFailureRate
+        expr: "stellarkraal_alert_fired{rule=\"high-contract-invocation-failure-rate\"} > 0"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High Contract Invocation Failure Rate"
+          runbook: "https://github.com/teslims2/StellarKraal-/blob/main/docs/runbooks/contract-invocation-failure.md"
+          dashboard: "http://localhost:3000/d/stellarkraal-backend?var-alert=high-contract-invocation-failure-rate"

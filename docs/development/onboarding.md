@@ -8,6 +8,124 @@ pipeline works, and where to find things.
 
 ---
 
+## Quick-Start Checklist
+
+Use this checklist to go from a fresh machine to your first open PR in under 2 hours.
+Tick each step as you complete it. Detailed instructions for each step are in the
+sections below (links provided).
+
+### Prerequisites (~15 min)
+
+- [ ] **Install Node.js 20+** (`node --version` shows `v20.x` or higher).
+  → [nodejs.org](https://nodejs.org/) or `nvm install 20` ([local-setup.md](local-setup.md))
+- [ ] **Install Rust 1.78+** (`rustc --version`).
+  → `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- [ ] **Install stellar-cli 22+** (`stellar --version`).
+  → `cargo install --locked stellar-cli --features opt`
+- [ ] **Install Docker & Docker Compose 24+** (optional, for the full stack).
+  → [docs.docker.com](https://docs.docker.com/get-docker/)
+- [ ] **Install the [Freighter](https://www.freighter.app/) browser extension** (needed for
+  wallet flows; optional for backend-only work).
+
+### Fork and clone (~5 min)
+
+- [ ] **Fork** the repo on GitHub: `https://github.com/teslims2/StellarKraal-`
+- [ ] **Clone your fork** and add the upstream remote:
+  ```bash
+  git clone https://github.com/<your-username>/StellarKraal-.git
+  cd StellarKraal-
+  git remote add upstream https://github.com/teslims2/StellarKraal-.git
+  ```
+- [ ] **Copy the env file:**
+  ```bash
+  cp env.example .env
+  ```
+  Open `.env` and fill in at minimum `CONTRACT_ID` and `JWT_SECRET`.
+  → [Environment Variables section](#5-environment-variables)
+
+### Install dependencies and run the backend (~10 min)
+
+- [ ] **Install backend dependencies:**
+  ```bash
+  cd backend && npm install
+  ```
+- [ ] **Run database migrations:**
+  ```bash
+  npm run migrate:dev
+  ```
+- [ ] **Start the backend dev server:**
+  ```bash
+  npm run dev
+  ```
+  Confirm you see `Server listening on port 3001` in the terminal.
+- [ ] **Smoke test:**
+  ```bash
+  curl http://localhost:3001/api/health
+  # Expected: {"status":"healthy",...}
+  ```
+
+### Install dependencies and run the frontend (~5 min)
+
+- [ ] **Open a second terminal.** Install frontend dependencies and start the dev server:
+  ```bash
+  cd frontend && npm install && npm run dev
+  ```
+- [ ] Open `http://localhost:3000` in your browser and confirm the app loads.
+
+### Run the test suites (~15 min)
+
+- [ ] **Backend unit tests** (must pass locally before opening a PR):
+  ```bash
+  cd backend && npm test
+  ```
+- [ ] **Frontend unit tests:**
+  ```bash
+  cd frontend && npm run test
+  ```
+- [ ] **Smart contract tests** (requires Rust toolchain):
+  ```bash
+  cd contracts/stellarkraal && cargo test
+  ```
+  → [Running Tests section](#7-running-tests)
+
+### Make a small change (~15 min)
+
+- [ ] **Create a branch from `main`:**
+  ```bash
+  git checkout main && git pull upstream main
+  git checkout -b docs/onboarding-test-<your-github-handle>
+  ```
+- [ ] **Make a trivial change** — for example, fix a typo in any file under `docs/` or add a
+  comment to `backend/src/config.ts`. Keep the change small and self-contained.
+- [ ] **Commit using Conventional Commits format:**
+  ```bash
+  git add <changed-file>
+  git commit -m "docs: fix typo in onboarding guide"
+  ```
+  → [Commit Convention section](#9-commit-convention)
+
+### Open a PR (~5 min)
+
+- [ ] **Push your branch:**
+  ```bash
+  git push -u origin docs/onboarding-test-<your-github-handle>
+  ```
+- [ ] **Open a pull request** on GitHub against `teslims2/StellarKraal-` `main`. Fill in the
+  PR template (title, description, checklist).
+- [ ] **Confirm CI is green** — about 15 workflows trigger in parallel. Wait for the required
+  checks (`backend-ci`, `frontend-ci`, `contracts-ci`, `secret-scan`) to pass.
+  → [CI/CD Pipeline section](#8-cicd-pipeline)
+
+---
+
+> **Estimated total time:** ~70 minutes (prerequisites may take longer on a fresh machine).
+> If you get stuck, check [`docs/troubleshooting.md`](../troubleshooting.md) or open a
+> [GitHub issue](https://github.com/teslims2/StellarKraal-/issues).
+
+---
+
+---
+
 ## 1. Repository Structure
 
 ```

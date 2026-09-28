@@ -231,7 +231,16 @@ npm run migrate:dev --prefix backend
 
 ## Freighter Wallet
 
-### 16. Freighter extension not detected — `isConnected()` returns `false`
+StellarKraal uses the [Freighter browser extension](https://www.freighter.app/) to sign
+Stellar transactions without exposing private keys to the web page. The entries in this
+section cover the most common integration problems: extension not installed, network mismatch
+between the wallet and the app, browser popup blocking, and user-cancelled transactions.
+
+For the full Freighter integration reference — including the `freighterClient.ts` wrapper API,
+the `useWallet` hook, mock setup for tests, and network switching details — see
+**[docs/guides/freighter-integration.md](guides/freighter-integration.md)**.
+
+### 16. Freighter extension not installed or not detected — `isConnected()` returns `false`
 
 **Symptom:** The wallet connect button shows "Install Freighter" or the app reports the wallet is unavailable even after the extension is installed.
 
@@ -300,6 +309,35 @@ If Freighter closes the popup before you can approve a transaction, make sure yo
 1. Wait a few seconds, then retry — the frontend refetches the account's sequence number on each new transaction build.
 2. If the error persists, clear Freighter's cached account data: open Freighter → Settings → Manage Assets → select the account → clear/refresh.
 3. See also: **Entry 12** (`txBAD_SEQ` from the backend side) for backend-specific sequence handling.
+
+---
+
+### 21. Freighter signing popup blocked by the browser
+
+**Symptom:** Clicking "Sign" or "Connect Wallet" triggers no visible Freighter popup. The browser may show a blocked-popup icon in the address bar. The app appears to hang until it times out with a rejection error.
+
+**Cause:** The browser's built-in popup blocker (or a browser extension such as an ad blocker or privacy tool) prevented the Freighter extension popup from opening. Browsers block extension popups when they are not triggered by a direct user gesture, or when blanket popup blocking is enabled for the origin.
+
+**Resolution:**
+
+1. **Check the browser popup blocker.**
+   - Chrome/Brave: look for the blocked popup icon (🚫) in the address bar → click it → select **"Always allow pop-ups and redirects from [origin]"** → confirm.
+   - Firefox: yellow notification bar at the top of the page → **"Allow"** → reload.
+   - Edge: click the blocked popup icon → **"Always allow"**.
+
+2. **Disable interfering extensions temporarily.**
+   - Ad blockers (uBlock Origin, AdBlock Plus), privacy tools (Privacy Badger), and popup managers can intercept extension events. Disable them for the StellarKraal origin and retry.
+   - To identify the culprit, open the browser in a private/incognito window with extensions disabled: if the popup appears there, a specific extension is the cause.
+
+3. **Ensure the sign action is triggered by a direct user gesture (click/tap).**
+   - Freighter's `signTransaction` call must originate from a user event handler. If the call is deferred (e.g., inside a `setTimeout` or `Promise.then` chain that runs after the user gesture has expired), the browser may classify it as an automatic popup and block it.
+
+4. **Verify the Freighter extension is unlocked** (see **Entry 17** above). A locked wallet may silently suppress the popup rather than prompting for a password in some browser configurations.
+
+After unblocking popups, reload the StellarKraal tab and retry the action.
+
+See **[docs/guides/freighter-integration.md](guides/freighter-integration.md)** for more on
+the `signTransaction` call flow.
 
 ---
 

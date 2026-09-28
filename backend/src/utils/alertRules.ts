@@ -58,4 +58,13 @@ export const rules = {
     runbook: "restore-procedure.md",
     pagerduty: true,
   },
+
+  highContractInvocationFailureRate: {
+    id: "high-contract-invocation-failure-rate",
+    name: "High Contract Invocation Failure Rate",
+    severity: "critical",
+    cooldownMs: 5 * 60 * 1000, // 5 min
+    runbook: "contract-invocation-failure.md",
+    pagerduty: true, // Directly blocks loan origination, repayment, and liquidation
+  },
 } satisfies Record<string, AlertRule>;

@@ -25,10 +25,6 @@ export interface CollateralRecord {
   count: number;
   appraised_value: number;
   appraisal_history: AppraisalEntry[];
-  species?: string;
-  age?: number;
-  weight?: number;
-  image_url?: string;
   status?: CollateralStatus;
   createdAt: string;
   deletedAt: string | null;
@@ -48,10 +44,12 @@ export interface LoanRecord {
 }
 
 export interface LoanSummary {
+  totalLoans: number;
   activeLoans: number;
-  totalCollateralValue: number;
-  averageHealthFactor: number;
-  atRiskCount: number;
+  atRiskLoans: number;
+  repaidLoans: number;
+  liquidatedLoans: number;
+  totalLoanValueXLM: number;
 }
 
 export type TransactionType = 'loan' | 'repayment' | 'liquidation';
@@ -65,6 +63,8 @@ export interface TransactionRecord {
   amount: number;
   loanId?: string;
   collateralId?: string;
+  /** Stellar transaction hash — used to link to the Stellar Expert explorer. */
+  tx_hash?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -307,6 +307,126 @@ export function listLoans(filters?: {
 }
 
 /**
+ * Encode a cursor from a loan record's `createdAt` timestamp and `id`.
+ *
+ * The cursor is a URL-safe base64 string of the form `<createdAt>|<id>`.
+ * Using both fields guarantees stable uniqueness even when multiple loans
+ * share the same millisecond timestamp.
+ *
+ * @param createdAt - ISO 8601 creation timestamp.
+ * @param id - Loan record ID.
+ * @returns Base64url-encoded cursor string.
+ */
+export function encodeLoanCursor(createdAt: string, id: string): string {
+  return Buffer.from(`${createdAt}|${id}`).toString('base64url');
+}
+
+/**
+ * Decode a cursor produced by {@link encodeLoanCursor}.
+ *
+ * @param cursor - Base64url-encoded cursor string.
+ * @returns Decoded `{ createdAt, id }` or `null` if the cursor is malformed.
+ */
+export function decodeLoanCursor(
+  cursor: string
+): { createdAt: string; id: string } | null {
+  try {
+    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+    const pipeIdx = decoded.indexOf('|');
+    if (pipeIdx === -1) return null;
+    const createdAt = decoded.slice(0, pipeIdx);
+    const id = decoded.slice(pipeIdx + 1);
+    if (!createdAt || !id || isNaN(new Date(createdAt).getTime())) return null;
+    return { createdAt, id };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return non-deleted loan records using cursor-based pagination.
+ *
+ * Records are ordered by `(createdAt DESC, id DESC)` for stable traversal.
+ * The cursor encodes the `createdAt` + `id` of the **last record seen**, and
+ * the next page begins immediately after that position.
+ *
+ * @param filters - Filter and pagination parameters.
+ * @param filters.cursor - Opaque page token produced by a previous response.
+ *   When omitted, returns the first page.
+ * @param filters.limit - Maximum records to return (default 20, max 100).
+ * @param filters.status - Filter by loan status.
+ * @param filters.borrowerAddress - Filter by borrower address.
+ * @param filters.from - ISO 8601 lower bound for `createdAt`.
+ * @param filters.to   - ISO 8601 upper bound for `createdAt`.
+ * @returns `{ data, nextCursor, hasMore }` where `nextCursor` is the opaque
+ *   token to pass as `?cursor=` on the next request, or `null` when there
+ *   are no more pages.
+ */
+export function listLoansCursor(filters?: {
+  cursor?: string;
+  limit?: number;
+  status?: string;
+  borrowerAddress?: string;
+  from?: string;
+  to?: string;
+}): { data: LoanRecord[]; nextCursor: string | null; hasMore: boolean } {
+  const limit = Math.min(filters?.limit ?? 20, 100);
+
+  // Decode cursor position if provided
+  let cursorCreatedAt: Date | null = null;
+  let cursorId: string | null = null;
+  if (filters?.cursor) {
+    const decoded = decodeLoanCursor(filters.cursor);
+    if (decoded) {
+      cursorCreatedAt = new Date(decoded.createdAt);
+      cursorId = decoded.id;
+    }
+  }
+
+  let results = [...loanTable.values()].filter((r) => r.deletedAt === null);
+
+  // Apply filters
+  if (filters?.status) results = results.filter((r) => r.status === filters.status);
+  if (filters?.borrowerAddress)
+    results = results.filter((r) => r.borrower === filters.borrowerAddress);
+  if (filters?.from)
+    results = results.filter((r) => new Date(r.createdAt) >= new Date(filters.from!));
+  if (filters?.to)
+    results = results.filter((r) => new Date(r.createdAt) <= new Date(filters.to!));
+
+  // Sort by (createdAt DESC, id DESC) for stable pagination
+  results.sort((a, b) => {
+    const timeDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    if (timeDiff !== 0) return timeDiff;
+    return b.id.localeCompare(a.id);
+  });
+
+  // Apply cursor: skip records that appear at or before the cursor position
+  if (cursorCreatedAt !== null && cursorId !== null) {
+    const cursorTs = cursorCreatedAt.getTime();
+    const cursorIdValue = cursorId;
+    const cursorIdx = results.findIndex((r) => {
+      const rTs = new Date(r.createdAt).getTime();
+      if (rTs !== cursorTs) return rTs < cursorTs;
+      return r.id.localeCompare(cursorIdValue) < 0;
+    });
+    results = cursorIdx === -1 ? [] : results.slice(cursorIdx);
+  }
+
+  // Fetch one extra to determine if there's a next page
+  const page = results.slice(0, limit + 1);
+  const hasMore = page.length > limit;
+  const data = page.slice(0, limit);
+
+  const nextCursor =
+    hasMore && data.length > 0
+      ? encodeLoanCursor(data[data.length - 1].createdAt, data[data.length - 1].id)
+      : null;
+
+  return { data, nextCursor, hasMore };
+}
+
+/**
  * Return all active (non-deleted, active or at_risk) loan records.
  * @returns Array of active {@link LoanRecord} objects.
  */
@@ -327,48 +447,30 @@ function normalizeHealthFactor(value: number | null | undefined): number | null 
 
 /**
  * Aggregate dashboard metrics for loans belonging to a borrower.
- * Only active/at_risk non-deleted loans are included.
+ * Returns counts by status and total loan value.
  * @param borrower - Borrower wallet/public key.
  * @returns Aggregated loan summary metrics.
  */
 export function getLoanSummaryForBorrower(borrower: string): LoanSummary {
-  const activeLoans = [...loanTable.values()].filter(
-    (r) =>
-      r.deletedAt === null &&
-      r.borrower === borrower &&
-      (r.status === 'active' || r.status === 'at_risk')
+  const allLoans = [...loanTable.values()].filter(
+    (r) => r.deletedAt === null && r.borrower === borrower
   );
 
-  const totalCollateralValue = activeLoans.reduce((sum, loan) => {
-    const collateral = collateralTable.get(loan.collateral_id);
-    if (!collateral || collateral.deletedAt !== null) return sum;
-    return sum + collateral.appraised_value;
-  }, 0);
+  const activeLoans = allLoans.filter((r) => r.status === 'active').length;
+  const atRiskLoans = allLoans.filter((r) => r.status === 'at_risk').length;
+  const repaidLoans = allLoans.filter((r) => r.status === 'repaid').length;
+  const liquidatedLoans = allLoans.filter((r) => r.status === 'liquidated').length;
+  const totalLoans = allLoans.length;
 
-  const normalizedHealthFactors = activeLoans
-    .map((loan) => normalizeHealthFactor(loan.health_factor))
-    .filter((value): value is number => value !== null);
-
-  const averageHealthFactor =
-    normalizedHealthFactors.length > 0
-      ? Number(
-          (
-            normalizedHealthFactors.reduce((sum, value) => sum + value, 0) /
-            normalizedHealthFactors.length
-          ).toFixed(4)
-        )
-      : 0;
-
-  const atRiskCount = activeLoans.filter((loan) => {
-    const hf = normalizeHealthFactor(loan.health_factor);
-    return hf !== null && hf < 1.2;
-  }).length;
+  const totalLoanValueXLM = allLoans.reduce((sum, loan) => sum + loan.amount, 0);
 
   return {
-    activeLoans: activeLoans.length,
-    totalCollateralValue,
-    averageHealthFactor,
-    atRiskCount,
+    totalLoans,
+    activeLoans,
+    atRiskLoans,
+    repaidLoans,
+    liquidatedLoans,
+    totalLoanValueXLM,
   };
 }
 

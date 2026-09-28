@@ -57,7 +57,7 @@ import {
 import logger, { createRequestLogger } from './utils/logger';
 import { pool, PoolExhaustedError } from './utils/connectionPool';
 import { auditMiddleware, redact, auditLogger } from './middleware/audit';
-import { gracefulShutdown, registerSignalHandlers } from './utils/gracefulShutdown';
+import { registerSignalHandlers } from './utils/gracefulShutdown';
 import { requestDrainingMiddleware } from './middleware/requestDraining';
 import { shutdownGuardMiddleware } from './middleware/shutdownGuard';
 import { authRouter, jwtMiddleware } from './middleware/auth';
@@ -78,7 +78,7 @@ import path from 'path';
 import { mkdirSync, unlinkSync } from 'fs';
 import multer from 'multer';
 import { z } from 'zod';
-import { globalLimiter, authLimiter, readLimiter, writeLimiter } from './middleware/rateLimit';
+import { globalLimiter, authLimiter, readLimiter, writeLimiter, walletLimiter } from './middleware/rateLimit';
 import { asyncHandler } from './utils/asyncHandler';
 import { validate } from './middleware/validate';
 import { stellarPublicKeySchema } from './validators/stellar';
@@ -148,7 +148,11 @@ app.use(requestDrainingMiddleware);
 // Shutdown guard middleware - reject new requests during graceful shutdown
 app.use(shutdownGuardMiddleware);
 
-// ── Health check — excluded from rate limiting and JWT ────────────────────────
+// GET /health
+app.get('/health', (_req: Request, res: Response) => {
+  res.status(200).json({ status: 'ok', uptime: Math.floor((Date.now() - startTime) / 1000) });
+});
+
 // GET /api/health
 app.get('/api/health', async (_req: Request, res: Response) => {
   const uptime = Math.floor((Date.now() - startTime) / 1000);
@@ -266,8 +270,8 @@ app.use('/api/v2', v2Router);
  *
  * Apollo Sandbox (interactive explorer) is available in non-production at /graphql.
  *
- * The endpoint is intentionally unauthenticated for the PoC; add jwtMiddleware
- * to the handler array when authentication is required.
+ * JWT auth middleware is applied so that the authenticated wallet address is
+ * forwarded to resolvers via GraphQLContext.userPublicKey (#1220).
  */
 let apolloServer: import('@apollo/server').ApolloServer | undefined;
 
@@ -276,8 +280,9 @@ let apolloServer: import('@apollo/server').ApolloServer | undefined;
     const { middleware, server } = await createGraphQLMiddleware();
     apolloServer = server;
     // Apollo Server 4 / expressMiddleware requires JSON body parsing before the handler.
+    // jwtMiddleware guards POST requests (all GraphQL operations use POST).
     // Cast to any to work around Express 5 generic overload resolution.
-    app.use('/graphql', express.json(), middleware as any);
+    app.use('/graphql', express.json(), jwtMiddleware, middleware as any);
     logger.info('GraphQL endpoint mounted at /graphql');
   } catch (err) {
     logger.error('Failed to start Apollo Server', {
@@ -499,6 +504,7 @@ app.post(
 // POST /api/loan/request
 app.post(
   '/api/loan/request',
+  walletLimiter,
   timeoutMiddleware(CONTRACT_TIMEOUT_MS),
   asyncHandler(async (req: Request, res: Response) => {
     const validation = loanRequestSchema.safeParse(req.body);
@@ -846,7 +852,7 @@ app.get(
       return res.status(404).json({ error: `Loan ${req.params.id} not found` });
     }
 
-    const collateral = getCollateral(loan.collateral_id);
+    const collateral = getCollateralIncludingDeleted(loan.collateral_id);
 
     // Fetch on-chain status from Soroban contract
     let onChainStatus: unknown = null;
@@ -1305,11 +1311,10 @@ app.post(
       animal_type: species.trim(),
       count: 1,
       appraised_value,
-      species: species.trim(),
       breed: breed.trim(),
-      age: ageNum,
-      weight: weightNum,
-      image_url: imageUrl,
+      age_years: ageNum,
+      weight_kg: weightNum,
+      photo_url: imageUrl,
     });
 
     invalidateCache('/api/collateral');
@@ -2097,15 +2102,17 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   errorHandler(err, req, res, next);
 });
 
+let httpServer: import('http').Server | undefined;
 if (process.env.NODE_ENV !== 'test') {
   const PORT = parseInt(process.env.PORT || '3001', 10);
-  app.listen(PORT, () => {
+  httpServer = app.listen(PORT, () => {
     logger.info(`StellarKraal API running on port ${PORT}`, {
       port: PORT,
       environment: process.env.NODE_ENV || 'development',
       logLevel: process.env.LOG_LEVEL || 'info',
     });
   });
+  registerSignalHandlers(httpServer, SHUTDOWN_TIMEOUT_MS, undefined, healthFactorTask);
 }
 
 const healthFactorTask = scheduleHealthFactorJob();
@@ -2115,86 +2122,10 @@ scheduleRepaymentReminderJob();
 
 const SHUTDOWN_TIMEOUT_MS = parseInt(config.SHUTDOWN_TIMEOUT_MS, 10);
 
-async function gracefulShutdown(signal: string): Promise<void> {
-  if (isShuttingDown) {
-    logger.warn('Shutdown already in progress, ignoring signal', { signal });
-    return;
-  }
-
-  isShuttingDown = true;
-  logger.info(`Received ${signal}, starting graceful shutdown...`, { signal });
-
-  // Stop accepting new connections
-  httpServer.close(() => {
-    logger.info('HTTP server closed, no longer accepting connections');
-  });
-
-  // Set a timeout to force shutdown if graceful shutdown takes too long
-  const forceShutdownTimer = setTimeout(() => {
-    logger.error('Graceful shutdown timeout exceeded, forcing exit', {
-      timeoutMs: SHUTDOWN_TIMEOUT_MS,
-    });
-    process.exit(1);
-  }, SHUTDOWN_TIMEOUT_MS);
-
-  try {
-    // Wait for in-flight requests to complete
-    await new Promise<void>((resolve) => {
-      const checkInterval = setInterval(() => {
-        const stats = pool.stats();
-        if (stats.inUse === 0) {
-          clearInterval(checkInterval);
-          resolve();
-        } else {
-          logger.info('Waiting for in-flight requests to complete', {
-            inUse: stats.inUse,
-          });
-        }
-      }, 1000);
-    });
-
-    logger.info('All in-flight requests completed');
-
-    // Close database connections
-    pool.close();
-    logger.info('Database connection pool closed');
-
-    // Stop Apollo GraphQL server
-    if (apolloServer) {
-      await apolloServer.stop();
-      logger.info('Apollo GraphQL server stopped');
-    }
-
-    healthFactorTask.stop();
-    logger.info('Health factor job stopped');
-
-    clearTimeout(forceShutdownTimer);
-    logger.info('Graceful shutdown complete');
-    process.exit(0);
-  } catch (error) {
-    logger.error('Error during graceful shutdown', {
-      error: (error as Error).message,
-    });
-    clearTimeout(forceShutdownTimer);
-    process.exit(1);
-  }
-}
-
-// Register signal handlers
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Handle uncaught errors
-process.on('uncaughtException', (error: Error) => {
-  logger.error('Uncaught exception', {
-    error: error.message,
-    stack: error.stack,
-  });
-  gracefulShutdown('uncaughtException');
-});
-
 // Register signal handlers for graceful shutdown
-registerSignalHandlers(httpServer, SHUTDOWN_TIMEOUT_MS, undefined, healthFactorTask);
+if (httpServer) {
+  registerSignalHandlers(httpServer, SHUTDOWN_TIMEOUT_MS, undefined, healthFactorTask);
+}
 
 // Redirect unversioned routes to v1 with deprecation warning
 app.use('/api', (req: Request, res: Response, next: NextFunction) => {

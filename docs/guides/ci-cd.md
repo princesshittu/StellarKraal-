@@ -33,6 +33,11 @@ All workflow files live in `.github/workflows/`.
 | `terraform.yml` | PR to `main`/`develop` (paths: `infrastructure/**`) and push to `main` | On PR: fmt-check, init, validate, plan for both `staging` and `production` workspaces, posts plan output as a PR comment. On push to `main`: applies to `staging` automatically, then applies to `production` after manual approval |
 | `terraform-check.yml` | PR (paths: `terraform/**`) | Standalone Terraform format and validation check for the `terraform/` directory |
 
+For step-by-step instructions on running Terraform commands locally against the staging
+environment — including prerequisites, `terraform init`, `terraform plan`, `terraform apply`,
+rollback procedures, and common error resolutions — see
+**[docs/deployment/staging-deployment.md — Terraform Infrastructure Deployment](../deployment/staging-deployment.md#terraform-infrastructure-deployment)**.
+
 ### Security and scanning
 
 | Workflow file | Trigger | Purpose |

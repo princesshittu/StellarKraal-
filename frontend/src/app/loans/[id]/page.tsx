@@ -6,6 +6,7 @@ import dynamic from 'next/dynamic';
 import ErrorState from '@/components/ErrorState';
 import DetailSkeleton from '@/components/DetailSkeleton';
 import HealthGauge, { SkeletonHealthGauge } from '@/components/HealthGauge';
+import HealthFactorAlert from '@/components/HealthFactorAlert';
 import { useHealthFactor } from '@/hooks/useHealthFactor';
 
 // Heavy component — loaded lazily to reduce initial JS bundle (#1070)
@@ -168,6 +169,15 @@ export default function LoanDetailPage() {
   const [primaryActionReady, setPrimaryActionReady] = useState(false);
   const primaryActionRef = useRef<HTMLButtonElement>(null);
 
+  // Real-time health factor — polls every 30 s, pauses when tab is hidden.
+  // loanId is passed as empty string until id is confirmed; hook no-ops on ''.
+  const {
+    healthFactor,
+    loading: hfLoading,
+    lastUpdatedLabel,
+    hasFetched: hfHasFetched,
+  } = useHealthFactor(id ?? '');
+
   const fetchLoan = async () => {
     try {
       setLoading(true);
@@ -322,6 +332,49 @@ export default function LoanDetailPage() {
 
       {loan.status === 'active' && (
         <>
+          {/* Real-time health factor gauge + alert banners */}
+          <section
+            aria-label="Health factor"
+            className="mb-6"
+            data-testid="health-factor-section"
+          >
+            <div className="bg-white rounded-2xl p-6 shadow">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-brown">Health Factor</h2>
+                {lastUpdatedLabel && (
+                  <span
+                    className="text-xs text-brown/40"
+                    aria-label={`Health factor last updated ${lastUpdatedLabel}`}
+                  >
+                    Updated {lastUpdatedLabel}
+                  </span>
+                )}
+                {hfLoading && (
+                  <span className="text-xs text-brown/40 animate-pulse" aria-live="polite">
+                    Refreshing…
+                  </span>
+                )}
+              </div>
+
+              {/* Gauge — show skeleton until first fetch completes */}
+              {hfHasFetched && healthFactor !== null ? (
+                <HealthGauge
+                  value={Math.round(healthFactor * 10_000)}
+                  aria-label={`Health factor: ${healthFactor.toFixed(2)}`}
+                />
+              ) : (
+                <SkeletonHealthGauge />
+              )}
+
+              {/* Warning / critical alert banners */}
+              {hfHasFetched && healthFactor !== null && (
+                <div className="mt-4">
+                  <HealthFactorAlert healthFactor={healthFactor} />
+                </div>
+              )}
+            </div>
+          </section>
+
           <LoanRepaymentCalculator
             loanId={loan.id}
             outstanding={loan.outstanding ?? loan.amount}
