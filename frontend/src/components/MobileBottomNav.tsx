@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { LayoutDashboard, ClipboardList, Beef, User } from 'lucide-react';
 import { Icon } from '@/components/Icon';
+import LanguageSwitcher from '@/components/LanguageSwitcher';
 
 interface NavItem {
   label: string;
@@ -69,6 +70,11 @@ export default function MobileBottomNav() {
             </Link>
           );
         })}
+
+        {/* Language switcher — #1256 */}
+        <div className="flex flex-1 flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px]">
+          <LanguageSwitcher />
+        </div>
       </div>
     </nav>
   );

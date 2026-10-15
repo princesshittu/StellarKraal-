@@ -9,7 +9,7 @@ interface Props {
 }
 
 /**
- * Route-level error boundary — #1097
+ * Route-level error boundary — #1097 / #1255
  *
  * Shown when a server component in a route segment throws.
  * Unlike global-error.tsx (which wraps the root layout), this component
@@ -20,6 +20,7 @@ interface Props {
  *   - Error ID (digest) for support reference in production
  *   - "Try again" button that calls reset()
  *   - "Go home" link
+ *   - "Contact support" link (#1255)
  */
 export default function RouteError({ error, reset }: Props) {
   const referenceId = error.digest
@@ -72,7 +73,17 @@ export default function RouteError({ error, reset }: Props) {
         className="text-brown/60 max-w-md mb-6"
       >
         An unexpected error occurred on this page. You can try again or return
-        home. If the problem continues, share the reference ID with support.
+        home. If the problem persists, please{" "}
+        <Link
+          href="/help/faq"
+          className="underline underline-offset-2 font-medium text-brown/80 hover:text-brown transition focus:outline-none focus:ring-2 focus:ring-gold rounded"
+        >
+          contact support
+        </Link>
+        {referenceId && (
+          <> and share the reference ID below</>
+        )}
+        .
       </p>
 
       {/* Support reference ID — shown in production */}
@@ -116,6 +127,13 @@ export default function RouteError({ error, reset }: Props) {
             hover:border-brown/60 transition focus:outline-none focus:ring-2 focus:ring-gold"
         >
           Go home
+        </Link>
+        <Link
+          href="/help/faq"
+          className="border border-brown/30 text-brown font-semibold px-6 py-3 rounded-xl
+            hover:border-brown/60 transition focus:outline-none focus:ring-2 focus:ring-gold"
+        >
+          Contact support
         </Link>
       </div>
     </div>

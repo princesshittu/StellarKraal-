@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import StatusBadge from "@/components/StatusBadge";
+import AppraisalChangeIndicator from "@/components/AppraisalChangeIndicator";
 import { colors } from "@/lib/design-tokens";
 
 export type CollateralItemStatus = "available" | "pledged" | "liquidated";
@@ -15,6 +16,11 @@ export interface CollateralStatusCardProps {
   count: number;
   /** Appraised value in stroops */
   appraisedValue: number;
+  /**
+   * Previous appraised value in stroops, used to compute the change indicator.
+   * When `undefined` or `null` no indicator is shown (no prior appraisal).
+   */
+  previousAppraisedValue?: number | null;
   /** Collateral status — drives badge colour */
   status: CollateralItemStatus;
   /**
@@ -64,6 +70,7 @@ export default function CollateralStatusCard({
   animalType,
   count,
   appraisedValue,
+  previousAppraisedValue,
   status,
   photoUrl,
   onClick,
@@ -159,9 +166,15 @@ export default function CollateralStatusCard({
           <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
             Appraised value
           </p>
-          <p className="text-lg font-semibold text-gray-900 dark:text-gray-100 tabular-nums">
-            {formatXlm(appraisedValue)}
-          </p>
+          <div className="flex items-baseline gap-2">
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100 tabular-nums">
+              {formatXlm(appraisedValue)}
+            </p>
+            <AppraisalChangeIndicator
+              currentValue={appraisedValue}
+              previousValue={previousAppraisedValue}
+            />
+          </div>
         </div>
 
         {/* Count */}

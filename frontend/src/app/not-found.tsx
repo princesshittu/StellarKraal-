@@ -48,9 +48,20 @@ export default function NotFound() {
       {/* Shows the invalid path that was requested */}
       <NotFoundPath />
 
-      <p className="text-brown/60 max-w-sm mb-8">
-        Looks like this page wandered off the pasture. Let&apos;s get you back on
-        track.
+      <p className="text-brown/60 max-w-sm mb-2">
+        Looks like this page wandered off the pasture. Double-check the URL or
+        head back to the dashboard to find what you&apos;re looking for.
+      </p>
+
+      <p className="text-brown/50 text-sm max-w-sm mb-8">
+        If you followed a link inside the app, it may be outdated.{" "}
+        <Link
+          href="/help/faq"
+          className="underline underline-offset-2 hover:text-brown transition focus:outline-none focus:ring-2 focus:ring-gold rounded"
+        >
+          Visit Help & FAQ
+        </Link>{" "}
+        for guidance.
       </p>
 
       {/* Search bar — #1097 */}

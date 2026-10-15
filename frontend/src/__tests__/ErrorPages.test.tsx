@@ -80,7 +80,9 @@ describe("NotFound page with search bar (#1097)", () => {
 
   it("renders Help & FAQ popular link", () => {
     render(<NotFound />);
-    expect(screen.getByRole("link", { name: /help & faq/i })).toBeDefined();
+    // There may be multiple Help & FAQ links (one in body text, one in nav)
+    const links = screen.getAllByRole("link", { name: /help & faq/i });
+    expect(links.length).toBeGreaterThanOrEqual(1);
   });
 });
 
