@@ -426,3 +426,60 @@ describe('GraphQL PoC', () => {
     });
   });
 });
+
+// ── Query: user (issue #1537) ─────────────────────────────────────────────────
+
+describe('Query.user', () => {
+  it('returns null for a non-existent wallet address', async () => {
+    const result = await server.executeOperation({
+      query: `query { user(walletAddress: "GNONEXISTENT") { walletAddress } }`,
+    });
+
+    const body = result.body as {
+      kind: 'single';
+      singleResult: { data?: unknown; errors?: unknown[] };
+    };
+    expect(body.singleResult.errors).toBeUndefined();
+    const data = body.singleResult.data as { user: null };
+    expect(data.user).toBeNull();
+  });
+
+  it('returns a user profile once one exists', async () => {
+    // Insert a profile via the store
+    const { updateProfile } = await import('../db/store');
+    updateProfile(VALID_BORROWER, { displayName: 'Test User' });
+
+    const result = await server.executeOperation({
+      query: `
+        query {
+          user(walletAddress: "${VALID_BORROWER}") {
+            walletAddress
+            displayName
+            createdAt
+            updatedAt
+            loans { id }
+          }
+        }
+      `,
+    });
+
+    const body = result.body as {
+      kind: 'single';
+      singleResult: { data?: unknown; errors?: unknown[] };
+    };
+    expect(body.singleResult.errors).toBeUndefined();
+    const data = body.singleResult.data as {
+      user: {
+        walletAddress: string;
+        displayName: string;
+        createdAt: string;
+        updatedAt: string;
+        loans: unknown[];
+      };
+    };
+    expect(data.user.walletAddress).toBe(VALID_BORROWER);
+    expect(data.user.displayName).toBe('Test User');
+    expect(typeof data.user.createdAt).toBe('string');
+    expect(Array.isArray(data.user.loans)).toBe(true);
+  });
+});

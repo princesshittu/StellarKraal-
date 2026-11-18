@@ -276,17 +276,21 @@ app.use('/api/v1', loanRepaymentRouter);
 // ── API v2 stub ───────────────────────────────────────────────────────────────
 app.use('/api/v2', v2Router);
 
-// ── GraphQL endpoint (ADR-009 proof-of-concept) ───────────────────────────────
+// ── GraphQL endpoint (ADR-011, issue #1537) ───────────────────────────────────
 /**
- * POST /graphql
+ * POST /api/v2/graphql
  *
- * Apollo Server v4 GraphQL endpoint exposing Query { loans, collateral } and
- * Mutation { requestLoan, repayLoan } backed by the existing service layer.
+ * Apollo Server v4 GraphQL endpoint exposing Query { loans, collateral, user }
+ * and Mutation { requestLoan, repayLoan } backed by the existing service layer.
  *
- * Apollo Sandbox (interactive explorer) is available in non-production at /graphql.
+ * Also aliased at the legacy /graphql path for backwards compatibility.
+ *
+ * Apollo Sandbox (interactive explorer) is available in non-production.
  *
  * JWT auth middleware is applied so that the authenticated wallet address is
- * forwarded to resolvers via GraphQLContext.userPublicKey (#1220).
+ * forwarded to resolvers via GraphQLContext.userPublicKey.
+ * A per-request DataLoader (loansByBorrowerLoader) is added to context for
+ * N+1 prevention when resolving User.loans (#1537).
  */
 let apolloServer: import('@apollo/server').ApolloServer | undefined;
 
@@ -297,8 +301,10 @@ let apolloServer: import('@apollo/server').ApolloServer | undefined;
     // Apollo Server 4 / expressMiddleware requires JSON body parsing before the handler.
     // jwtMiddleware guards POST requests (all GraphQL operations use POST).
     // Cast to any to work around Express 5 generic overload resolution.
+    app.use('/api/v2/graphql', express.json(), jwtMiddleware, middleware as any);
+    // Keep the legacy /graphql alias to avoid breaking existing clients
     app.use('/graphql', express.json(), jwtMiddleware, middleware as any);
-    logger.info('GraphQL endpoint mounted at /graphql');
+    logger.info('GraphQL endpoint mounted at /api/v2/graphql (alias: /graphql)');
   } catch (err) {
     logger.error('Failed to start Apollo Server', {
       error: err instanceof Error ? err.message : String(err),

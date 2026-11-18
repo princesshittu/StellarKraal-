@@ -257,3 +257,98 @@ describe("GET /api/v1/health/deep", () => {
     });
   });
 });
+
+// ── GET /api/v1/health (root) — issue #1536 ───────────────────────────────────
+
+describe("GET /api/v1/health (root) — structured fields", () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildApp();
+    jest.clearAllMocks();
+  });
+
+  describe("all dependencies healthy", () => {
+    beforeEach(() => {
+      mockCheckDbHealth.mockResolvedValue(true);
+      mockRpcGetHealth.mockResolvedValue({ status: "healthy" } as any);
+    });
+
+    it("returns 200", async () => {
+      const res = await request(app).get("/api/v1/health");
+      expect(res.status).toBe(200);
+    });
+
+    it("includes status: 'healthy'", async () => {
+      const res = await request(app).get("/api/v1/health");
+      expect(res.body.status).toBe("healthy");
+    });
+
+    it("includes an ISO-8601 timestamp", async () => {
+      const res = await request(app).get("/api/v1/health");
+      expect(typeof res.body.timestamp).toBe("string");
+      expect(() => new Date(res.body.timestamp).toISOString()).not.toThrow();
+    });
+
+    it("includes a non-negative uptime (seconds)", async () => {
+      const res = await request(app).get("/api/v1/health");
+      expect(typeof res.body.uptime).toBe("number");
+      expect(res.body.uptime).toBeGreaterThanOrEqual(0);
+    });
+
+    it("includes a version string", async () => {
+      const res = await request(app).get("/api/v1/health");
+      expect(typeof res.body.version).toBe("string");
+      expect(res.body.version.length).toBeGreaterThan(0);
+    });
+
+    it("includes components for db, rpc, and eventListener", async () => {
+      const res = await request(app).get("/api/v1/health");
+      expect(res.body.components).toBeDefined();
+      expect(res.body.components.db).toBe("ok");
+      expect(res.body.components.rpc).toBe("ok");
+      expect(typeof res.body.components.eventListener).toBe("string");
+    });
+  });
+
+  describe("critical dependency unreachable — returns 503", () => {
+    it("returns 503 when db is degraded", async () => {
+      mockCheckDbHealth.mockResolvedValue(false);
+      mockRpcGetHealth.mockResolvedValue({ status: "healthy" } as any);
+
+      const res = await request(app).get("/api/v1/health");
+      expect(res.status).toBe(503);
+      expect(res.body.components.db).toBe("degraded");
+    });
+
+    it("returns 503 when rpc is degraded", async () => {
+      mockCheckDbHealth.mockResolvedValue(true);
+      mockRpcGetHealth.mockRejectedValue(new Error("connection refused"));
+
+      const res = await request(app).get("/api/v1/health");
+      expect(res.status).toBe(503);
+      expect(res.body.components.rpc).toBe("degraded");
+    });
+
+    it("still includes timestamp, uptime, and version on 503", async () => {
+      mockCheckDbHealth.mockResolvedValue(false);
+      mockRpcGetHealth.mockRejectedValue(new Error("down"));
+
+      const res = await request(app).get("/api/v1/health");
+      expect(typeof res.body.timestamp).toBe("string");
+      expect(typeof res.body.uptime).toBe("number");
+      expect(typeof res.body.version).toBe("string");
+    });
+  });
+
+  describe("response timing", () => {
+    it("responds within 2500 ms even when all checks pass", async () => {
+      mockCheckDbHealth.mockResolvedValue(true);
+      mockRpcGetHealth.mockResolvedValue({ status: "healthy" } as any);
+
+      const start = Date.now();
+      await request(app).get("/api/v1/health");
+      expect(Date.now() - start).toBeLessThan(2500);
+    });
+  });
+});

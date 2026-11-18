@@ -62,3 +62,29 @@ variable "backup_kms_key_arn" {
   type        = string
   default     = ""
 }
+
+###############################################################################
+# ECS Auto Scaling variables (issue #1534)
+###############################################################################
+
+variable "ecs_cpu_target_percent" {
+  description = "Target CPU utilisation percentage for the ECS service auto-scaling policy. Scale-out triggers when average CPU exceeds this value for 2 consecutive minutes."
+  type        = number
+  default     = 70
+
+  validation {
+    condition     = var.ecs_cpu_target_percent >= 10 && var.ecs_cpu_target_percent <= 90
+    error_message = "ecs_cpu_target_percent must be between 10 and 90."
+  }
+}
+
+variable "ecs_max_capacity" {
+  description = "Maximum number of ECS tasks the auto-scaling policy is allowed to run."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.ecs_max_capacity >= 1
+    error_message = "ecs_max_capacity must be at least 1."
+  }
+}

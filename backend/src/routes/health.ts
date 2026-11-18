@@ -4,6 +4,12 @@
  *
  * Verifies DB connectivity, Soroban RPC reachability, and available disk space.
  * Excluded from JWT auth and rate-limit middleware — registered before those are applied.
+ *
+ * Changes for issue #1536:
+ *  - GET /health (root) now returns uptime (seconds), version, and timestamp alongside
+ *    component status so orchestration platforms can correlate restarts with deployments.
+ *  - HTTP 503 is returned when any critical dependency (db or rpc) is unreachable.
+ *  - Health checks complete within 2 seconds (COMPONENT_TIMEOUT_MS = 2000).
  */
 
 import { Router, Request, Response } from "express";
@@ -14,8 +20,14 @@ import logger from "../utils/logger";
 /** Minimum free disk bytes before reporting degraded (500 MB) */
 const DISK_MIN_FREE_BYTES = 500 * 1024 * 1024;
 
-/** Per-component timeout for the aggregated /health check (ms) */
-const COMPONENT_TIMEOUT_MS = 3000;
+/**
+ * Per-component timeout for the aggregated /health check (ms).
+ * Must be low enough to avoid blocking container restarts (issue #1536: ≤2 s).
+ */
+const COMPONENT_TIMEOUT_MS = 2000;
+
+/** Process start time, used to calculate uptime. */
+const PROCESS_START = Date.now();
 
 type ComponentStatus = "ok" | "degraded";
 
@@ -27,13 +39,32 @@ interface DeepHealthResponse {
 
 type AggregatedStatus = "healthy" | "degraded" | "unhealthy";
 
+/** Root health response (issue #1536). */
 interface HealthResponse {
   status: AggregatedStatus;
+  /** ISO-8601 timestamp of when this response was generated. */
+  timestamp: string;
+  /** Process uptime in seconds. */
+  uptime: number;
+  /** Application version from package.json (NODE_ENV-aware). */
+  version: string;
   components: {
     db: ComponentStatus;
     rpc: ComponentStatus;
     eventListener: ComponentStatus;
   };
+}
+
+/** Application version — read from the APP_VERSION env var or the package.json version field. */
+function getAppVersion(): string {
+  if (process.env.APP_VERSION) return process.env.APP_VERSION;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const pkg = require('../../package.json') as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**
@@ -127,8 +158,10 @@ const healthRouter = Router();
  * Aggregated health check for Docker / ECS health probes. Reports the status
  * of all critical dependencies with a per-component timeout.
  *
- * @returns 200 `{ status: "healthy", components: { db, rpc, eventListener } }`
- * @returns 503 `{ status: "degraded" | "unhealthy", components }`
+ * Returns 200 when all dependencies are healthy, 503 otherwise (issue #1536).
+ *
+ * @returns 200 `{ status: "healthy", timestamp, uptime, version, components: { db, rpc, eventListener } }`
+ * @returns 503 `{ status: "degraded" | "unhealthy", timestamp, uptime, version, components }`
  */
 healthRouter.get("/", async (_req: Request, res: Response) => {
   const [dbHealthy, rpcHealthy, listenerHealthy] = await Promise.all([
@@ -153,8 +186,17 @@ healthRouter.get("/", async (_req: Request, res: Response) => {
     status = "degraded";
   }
 
-  const body: HealthResponse = { status, components };
-  res.status(status === "healthy" ? 200 : 503).json(body);
+  // Per issue #1536: return 503 when any critical dependency (db or rpc) is unreachable
+  const criticalOk = dbHealthy && rpcHealthy;
+
+  const body: HealthResponse = {
+    status,
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor((Date.now() - PROCESS_START) / 1000),
+    version: getAppVersion(),
+    components,
+  };
+  res.status(criticalOk ? 200 : 503).json(body);
 });
 
 /**
